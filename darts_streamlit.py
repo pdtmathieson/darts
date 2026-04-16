@@ -9,6 +9,8 @@ import json
 import requests
 import pandas as pd
 
+APP_VERSION = "v0.5"
+
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Dartboard Tracker",
@@ -125,8 +127,8 @@ defaults = {
     "session_num": None,
     "last_click": None,
     "df_loaded": False,
-    "pending_xoff": None,
-    "pending_yoff": None,
+    "last_raw_x": "",
+    "last_raw_y": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -145,8 +147,8 @@ if not st.session_state["df_loaded"]:
 
 session_num = st.session_state["session_num"]
 
-# ─── Top controls ─────────────────────────────────────────────────────────────
-col_name, col_mode, col_prompt = st.columns([2, 2, 5])
+# ─── Header row: controls + version ──────────────────────────────────────────
+col_name, col_mode, col_prompt, col_ver = st.columns([2, 2, 5, 1])
 with col_name:
     inputuser = st.text_input("Name", value="Patrick", key="inputuser")
 with col_mode:
@@ -158,32 +160,44 @@ with col_prompt:
     else:
         st.warning("🎯 Click the board to set **RESULT**")
     st.markdown("</div>", unsafe_allow_html=True)
+with col_ver:
+    st.markdown(f"<div style='padding-top:32px;text-align:right;color:#888;font-size:12px'>{APP_VERSION}</div>",
+                unsafe_allow_html=True)
 
-# ─── Hidden number inputs — JS writes here, Streamlit reads on rerun ─────────
-# We use st.number_input with a unique key that JS targets via the DOM label.
-# A cleaner approach: use a plain st.text_input hidden behind CSS, updated by JS.
+# ─── Hidden inputs for JS→Python click communication ─────────────────────────
+# Invisible inputs; JS sets their values and fires Enter to trigger rerun
+st.markdown("""
+<style>
+div[data-testid="stTextInput"]:has(input[aria-label="_xoff"]),
+div[data-testid="stTextInput"]:has(input[aria-label="_yoff"]) {
+    position: absolute;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    opacity: 0;
+}
+</style>
+""", unsafe_allow_html=True)
 
-click_xoff = st.session_state.get("pending_xoff")
-click_yoff = st.session_state.get("pending_yoff")
+xoff_val = st.text_input("_xoff", value="", key="xoff_input", label_visibility="visible")
+yoff_val = st.text_input("_yoff", value="", key="yoff_input", label_visibility="visible")
 
-# Render two hidden text inputs that JS will populate and trigger change on
-xoff_val = st.text_input("_xoff", value="", key="xoff_input",
-                          label_visibility="collapsed")
-yoff_val = st.text_input("_yoff", value="", key="yoff_input",
-                          label_visibility="collapsed")
-
-# ─── Process a pending click ─────────────────────────────────────────────────
+# ─── Process click when inputs are populated ──────────────────────────────────
 if xoff_val and yoff_val:
     try:
         xd = float(xoff_val)
         yd = float(yoff_val)
         ck = (round(xd, 1), round(yd, 1))
 
+        st.session_state["last_raw_x"] = xoff_val
+        st.session_state["last_raw_y"] = yoff_val
+
         if st.session_state["last_click"] != ck:
             st.session_state["last_click"] = ck
 
             dist     = math.sqrt(xd**2 + yd**2)
-            pygame_y = -yd  # flip Y: canvas Y-down → up-positive for angle calc
+            pygame_y = -yd
             angle    = math.degrees(math.atan2(pygame_y, xd))
             if angle < 0:
                 angle += 360
@@ -203,7 +217,7 @@ if xoff_val and yoff_val:
                 st.session_state["click_positions"].append(
                     {"type": "Target", "xOff": xd, "yOff": yd}
                 )
-                st.session_state["display_text"] = f"Target set: **{seg}{mod}**"
+                st.session_state["display_text"] = f"Target: **{seg}{mod}**"
                 st.session_state["recording_target"] = False
 
             else:
@@ -230,7 +244,7 @@ if xoff_val and yoff_val:
                 hit_perc   = round(st.session_state["hit_cnt"] / st.session_state["shot_cnt"] * 100)
                 miss_label = "HIT ✅" if hit else "MISS ❌"
                 st.session_state["display_text"] = (
-                    f"Result: **{seg}{mod}** — {miss_label} — Miss distance: {total_miss}px"
+                    f"Result: **{seg}{mod}** — {miss_label} — Miss dist: {total_miss}px"
                 )
                 st.session_state["display_perc"] = (
                     f"Hit rate: **{hit_perc}%** "
@@ -242,25 +256,27 @@ if xoff_val and yoff_val:
                 append_row_to_github(td)
                 st.session_state["recording_target"] = True
 
-            # Clear the inputs for next click
-            st.session_state["xoff_input"] = ""
-            st.session_state["yoff_input"] = ""
-            st.rerun()
+        st.session_state["xoff_input"] = ""
+        st.session_state["yoff_input"] = ""
+        st.rerun()
     except (ValueError, TypeError):
         pass
 
-# ─── Board geometry & canvas ──────────────────────────────────────────────────
-CANVAS_W  = 720
-CANVAS_H  = 720
+# ─── Board + side panel layout ────────────────────────────────────────────────
+CANVAS_W   = 680
+CANVAS_H   = 680
 click_json = json.dumps(st.session_state["click_positions"])
 
-dartboard_html = f"""<!DOCTYPE html>
+board_col, panel_col = st.columns([3, 1])
+
+with board_col:
+    dartboard_html = f"""<!DOCTYPE html>
 <html>
 <head>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:#0e0e0e; display:flex; flex-direction:column;
-          justify-content:center; align-items:center; height:{CANVAS_H+10}px; }}
+  body {{ background:#0e0e0e; display:flex; justify-content:center;
+          align-items:center; height:{CANVAS_H+10}px; }}
   canvas {{ cursor:crosshair; }}
 </style>
 </head>
@@ -344,15 +360,21 @@ dartboard_html = f"""<!DOCTYPE html>
       ctx.fillText(SEGS[i], CX + LABEL_R*Math.cos(a), CY + LABEL_R*Math.sin(a));
     }}
 
+    // ── Click markers ──
     const clicks = {click_json};
     clicks.forEach(c => {{
       const px  = CX + c.xOff;
       const py  = CY + c.yOff;
       const col = c.type === "Target" ? "#ffe033" : "#ff8c00";
       const s   = 11;
-      ctx.lineWidth = 3; ctx.strokeStyle = col;
-      ctx.beginPath(); ctx.moveTo(px-s,py-s); ctx.lineTo(px+s,py+s); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(px+s,py-s); ctx.lineTo(px-s,py+s); ctx.stroke();
+      ctx.save();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = col;
+      ctx.shadowColor  = col;
+      ctx.shadowBlur   = 6;
+      ctx.beginPath(); ctx.moveTo(px-s, py-s); ctx.lineTo(px+s, py+s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(px+s, py-s); ctx.lineTo(px-s, py+s); ctx.stroke();
+      ctx.restore();
       ctx.beginPath(); ctx.arc(px, py, 4, 0, 2*Math.PI);
       ctx.fillStyle = col; ctx.fill();
     }});
@@ -360,7 +382,7 @@ dartboard_html = f"""<!DOCTYPE html>
 
   draw();
 
-  // ── Click handler: find Streamlit text inputs in parent and set values ──
+  // ── Click → inject into Streamlit hidden inputs ──
   cv.addEventListener("click", function(e) {{
     const rect = cv.getBoundingClientRect();
     const sx   = cv.width  / rect.width;
@@ -368,74 +390,95 @@ dartboard_html = f"""<!DOCTYPE html>
     const xOff = Math.round(((e.clientX - rect.left) * sx - CX) * 100) / 100;
     const yOff = Math.round(((e.clientY - rect.top)  * sy - CY) * 100) / 100;
 
-    // Walk up to the parent Streamlit document and find the hidden inputs
     try {{
       const doc    = window.parent.document;
       const inputs = doc.querySelectorAll('input[type="text"]');
       let xInput   = null;
       let yInput   = null;
-
-      // The inputs have aria-labels matching our label text
       inputs.forEach(inp => {{
-        const label = inp.getAttribute('aria-label') || '';
-        if (label === '_xoff') xInput = inp;
-        if (label === '_yoff') yInput = inp;
+        const lbl = inp.getAttribute('aria-label') || '';
+        if (lbl === '_xoff') xInput = inp;
+        if (lbl === '_yoff') yInput = inp;
       }});
 
       if (xInput && yInput) {{
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        const setter = Object.getOwnPropertyDescriptor(
           window.parent.HTMLInputElement.prototype, 'value'
         ).set;
-        nativeInputValueSetter.call(xInput, String(xOff));
-        nativeInputValueSetter.call(yInput, String(yOff));
+        setter.call(xInput, String(xOff));
+        setter.call(yInput, String(yOff));
         xInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
         yInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
-
-        // Submit the form by pressing Enter on the last input
         yInput.dispatchEvent(new KeyboardEvent('keydown', {{
           key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
         }}));
+      }} else {{
+        console.warn("Hidden inputs not found. Found inputs:", inputs.length);
       }}
     }} catch(err) {{
-      console.warn("Could not reach parent inputs:", err);
+      console.warn("Parent DOM access error:", err);
     }}
   }});
 </script>
 </body>
 </html>"""
 
-components.html(dartboard_html, height=CANVAS_H + 20, scrolling=False)
+    components.html(dartboard_html, height=CANVAS_H + 20, scrolling=False)
 
-# ─── Stats bar ────────────────────────────────────────────────────────────────
-st.divider()
-c1, c2, c3 = st.columns([4, 3, 2])
+    # XY coordinate readout — bottom left, small and unobtrusive
+    raw_x = st.session_state.get("last_raw_x", "")
+    raw_y = st.session_state.get("last_raw_y", "")
+    if raw_x and raw_y:
+        st.caption(f"Last click — X: {raw_x}  Y: {raw_y}")
 
-with c1:
+with panel_col:
+    st.markdown("### 📊 Session Stats")
+    st.markdown(f"**Session:** #{session_num}")
+    st.markdown("---")
+
+    # Last throw result
     if st.session_state["display_text"]:
         st.markdown(st.session_state["display_text"])
     if st.session_state["display_perc"]:
         st.markdown(st.session_state["display_perc"])
 
-with c2:
-    if st.session_state["x_miss_list"]:
-        xl = st.session_state["x_miss_list"]
-        yl = st.session_state["y_miss_list"]
-        st.markdown(f"X Miss Avg: **{round(sum(xl)/len(xl), 2)}px**")
-        st.markdown(f"Y Miss Avg: **{round(sum(yl)/len(yl), 2)}px**")
-    st.caption(f"Session #{session_num}")
+    st.markdown("---")
 
-with c3:
+    # Running miss averages
+    if st.session_state["x_miss_list"]:
+        xl   = st.session_state["x_miss_list"]
+        yl   = st.session_state["y_miss_list"]
+        xavg = round(sum(xl) / len(xl), 2)
+        yavg = round(sum(yl) / len(yl), 2)
+        st.markdown(f"**X Miss Avg:** {xavg}px")
+        st.markdown(f"**Y Miss Avg:** {yavg}px")
+        st.markdown(f"**Throws:** {int(st.session_state['shot_cnt'])}")
+    else:
+        st.caption("No throws recorded yet")
+
+    st.markdown("---")
+
+    # Marker legend
+    st.markdown("🟡 **Yellow X** = Target")
+    st.markdown("🟠 **Orange X** = Result")
+
+    st.markdown("---")
+
+    # Action buttons
     if st.button("🔄 Reset Markers", use_container_width=True):
         st.session_state["click_positions"] = []
         st.session_state["recording_target"] = True
         st.session_state["display_text"]     = ""
         st.session_state["display_perc"]     = ""
         st.session_state["last_click"]       = None
+        st.session_state["last_raw_x"]       = ""
+        st.session_state["last_raw_y"]       = ""
         st.rerun()
+
     if st.button("🆕 New Session", use_container_width=True):
         for k in ["recording_target","current_target_data","hit_cnt","shot_cnt",
                   "x_miss_list","y_miss_list","display_text","display_perc",
                   "click_positions","last_click","df_loaded","session_num",
-                  "xoff_input","yoff_input"]:
+                  "xoff_input","yoff_input","last_raw_x","last_raw_y"]:
             st.session_state.pop(k, None)
         st.rerun()
