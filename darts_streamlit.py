@@ -142,7 +142,7 @@ session_num = st.session_state["session_num"]
 # ─── Top controls ─────────────────────────────────────────────────────────────
 col_name, col_mode, col_prompt = st.columns([2, 2, 5])
 with col_name:
-    inputuser = st.text_input("Name", value="Patrick", key="inputuser")
+    inputuser = st.text_input("Name", value="Patrick2", key="inputuser")
 with col_mode:
     inputmode = st.selectbox("Mode", ["RTW", "Points"], key="inputmode")
 with col_prompt:
