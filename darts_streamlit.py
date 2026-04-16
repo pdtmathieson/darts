@@ -49,7 +49,6 @@ def load_csv_from_github() -> pd.DataFrame:
 
 def append_row_to_github(row: list):
     """Read CSV from GitHub, append row, push back."""
-    # 1. Get current file (content + sha)
     r = requests.get(API_FILE_URL, headers=GH_HEADERS, timeout=10)
     if r.status_code == 200:
         file_info = r.json()
@@ -61,35 +60,27 @@ def append_row_to_github(row: list):
         sha      = None
         old_text = ""
 
-    # 2. Build new CSV text: preserve existing + append new row
     buf = io.StringIO()
     if old_text.strip():
         buf.write(old_text)
         if not old_text.endswith("\n"):
             buf.write("\n")
     else:
-        # First ever write — add header
         writer = csv.writer(buf)
         writer.writerow(CSV_COLUMNS)
 
-    # Append new data row
     writer = csv.writer(buf)
     writer.writerow(row)
     new_content = buf.getvalue()
 
-    # 3. Push to GitHub
     encoded = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
-    payload = {
-        "message": f"dart throw - {row[0]}",
-        "content": encoded,
-    }
+    payload = {"message": f"dart throw - {row[0]}", "content": encoded}
     if sha:
         payload["sha"] = sha
-
     requests.put(API_FILE_URL, headers=GH_HEADERS, json=payload, timeout=15)
 
 
-# ─── Dart logic (mirrors pygame script exactly) ───────────────────────────────
+# ─── Dart logic ───────────────────────────────────────────────────────────────
 def determine_segment(angle_deg: float) -> int:
     angle = (angle_deg - 90) % 360
     segment_order = [20,5,12,9,14,11,8,16,7,19,3,17,2,15,10,6,13,4,18,1,20]
@@ -124,7 +115,7 @@ def init_state():
         "y_miss_list": [],
         "display_text": "",
         "display_perc": "",
-        "click_positions": [],   # {"type":"Target"|"Result", "xOff":float, "yOff":float}
+        "click_positions": [],
         "session_num": None,
         "last_click": None,
         "df_loaded": False,
@@ -135,7 +126,6 @@ def init_state():
 
 init_state()
 
-# Load session number once per app session
 if not st.session_state["df_loaded"]:
     df_existing = load_csv_from_github()
     if not df_existing.empty and "Session" in df_existing.columns:
@@ -149,7 +139,7 @@ if not st.session_state["df_loaded"]:
 
 session_num = st.session_state["session_num"]
 
-# ─── Top control bar ─────────────────────────────────────────────────────────
+# ─── Top controls ─────────────────────────────────────────────────────────────
 col_name, col_mode, col_prompt = st.columns([2, 2, 5])
 with col_name:
     inputuser = st.text_input("Name", value="Patrick", key="inputuser")
@@ -158,13 +148,13 @@ with col_mode:
 with col_prompt:
     st.markdown("<div style='padding-top:28px'>", unsafe_allow_html=True)
     if st.session_state["recording_target"]:
-        st.info("🎯 Click the board to set **TARGET**", icon=None)
+        st.info("🎯 Click the board to set **TARGET**")
     else:
-        st.warning("🎯 Click the board to set **RESULT**", icon=None)
+        st.warning("🎯 Click the board to set **RESULT**")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ─── Board geometry constants ─────────────────────────────────────────────────
-OUTER_RADIUS = 300   # canvas px
+# ─── Board geometry ───────────────────────────────────────────────────────────
+OUTER_RADIUS = 300
 CANVAS_W     = 720
 CANVAS_H     = 720
 
@@ -175,138 +165,174 @@ triple_outer = OUTER_RADIUS * (107   / 170)
 double_inner = OUTER_RADIUS * (162   / 170)
 double_outer = float(OUTER_RADIUS)
 
-SEGMENT_ORDER = [20,5,12,9,14,11,8,16,7,19,3,17,2,15,10,6,13,4,18,1]
-click_json    = json.dumps(st.session_state["click_positions"])
+click_json = json.dumps(st.session_state["click_positions"])
 
-# ─── HTML5 Canvas dartboard component ────────────────────────────────────────
+# ─── Dartboard HTML + JS with Streamlit.setTriggerValue ──────────────────────
+# Fix for vertical flip:
+#   - Canvas Y increases downward, so we do NOT flip Y when passing to Python
+#   - The angle calculation uses atan2(-yOff, xOff) in Python to match pygame
+# Fix for numbers orientation:
+#   - ANG_OFF = Math.PI*(9-90)/180  rotates board so 20 is at top
+#   - Labels use (CY + LABEL_DIST*Math.sin(a)) with no flip — correct for canvas
+
 dartboard_html = f"""<!DOCTYPE html>
 <html>
 <head>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:#0e0e0e; display:flex; justify-content:center; align-items:center; height:{CANVAS_H+10}px; }}
+  body {{ background:#0e0e0e; display:flex; justify-content:center; align-items:center;
+          height:{CANVAS_H+10}px; }}
   canvas {{ cursor:crosshair; }}
 </style>
 </head>
 <body>
 <canvas id="c" width="{CANVAS_W}" height="{CANVAS_H}"></canvas>
 <script>
-const cv  = document.getElementById("c");
-const ctx = cv.getContext("2d");
-const CX  = {CANVAS_W}/2, CY = {CANVAS_H}/2;
-const R   = {OUTER_RADIUS};
+  // Streamlit component communication
+  const Streamlit = {{
+    setTriggerValue: function(value) {{
+      window.parent.postMessage({{
+        isStreamlitMessage: true,
+        type: "streamlit:componentValue",
+        value: value
+      }}, "*");
+    }},
+    sendRenderEvent: function() {{
+      window.parent.postMessage({{
+        isStreamlitMessage: true,
+        type: "streamlit:componentReady",
+        apiVersion: 1
+      }}, "*");
+    }}
+  }};
 
-// Ring radii
-const IB = R*(6.35/170), OB = R*(16/170);
-const TI = R*(99/170),   TO = R*(107/170);
-const DI = R*(162/170),  DO = R;
+  window.addEventListener("message", function(e) {{
+    if (e.data.type === "streamlit:render") {{
+      // component ready - no-op, already drawn
+    }}
+  }});
 
-const SEGS       = [20,5,12,9,14,11,8,16,7,19,3,17,2,15,10,6,13,4,18,1];
-const ANG_OFF    = Math.PI*(-9+90)/180;
-const ANG_INC    = 2*Math.PI/20;
-const LABEL_DIST = DO + 26;
+  const cv  = document.getElementById("c");
+  const ctx = cv.getContext("2d");
+  const CX  = {CANVAS_W}/2, CY = {CANVAS_H}/2;
+  const R   = {OUTER_RADIUS};
 
-function arc(r0, r1, a0, a1, fill) {{
-  ctx.beginPath();
-  if (r0 > 0) {{
-    ctx.arc(CX, CY, r0, a0, a1);
-    ctx.arc(CX, CY, r1, a1, a0, true);
-  }} else {{
-    ctx.moveTo(CX, CY);
-    ctx.arc(CX, CY, r1, a0, a1);
-  }}
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-}}
+  const IB = R*(6.35/170), OB = R*(16/170);
+  const TI = R*(99/170),   TO = R*(107/170);
+  const DI = R*(162/170),  DO = R;
 
-function draw() {{
-  ctx.clearRect(0, 0, {CANVAS_W}, {CANVAS_H});
-  ctx.fillStyle = "#0e0e0e";
-  ctx.fillRect(0, 0, {CANVAS_W}, {CANVAS_H});
+  const SEGS    = [20,5,12,9,14,11,8,16,7,19,3,17,2,15,10,6,13,4,18,1];
+  // ANG_OFF: rotate so segment 20 is at top centre.
+  // In canvas coords (Y down), top = -PI/2.
+  // Segment boundaries at multiples of 18deg, offset by -9deg so 20 straddles top.
+  // -9 degrees = -PI/20, then subtract PI/2 to point upward:
+  const ANG_OFF  = -Math.PI/2 - Math.PI/20;
+  const ANG_INC  = 2*Math.PI/20;
+  const LABEL_R  = DO + 26;
 
-  // Outer dark circle (miss area)
-  ctx.beginPath(); ctx.arc(CX,CY,DO+22,0,2*Math.PI);
-  ctx.fillStyle="#1a1a1a"; ctx.fill();
-
-  // Draw 20 segments — each has: inner single, double ring, triple ring
-  for (let i=0; i<20; i++) {{
-    const a0   = i*ANG_INC + ANG_OFF;
-    const a1   = (i+1)*ANG_INC + ANG_OFF;
-    const even = (i%2===0);
-    const bw   = even ? "#2a2a2a" : "#e8e0cc";
-    const col  = even ? "#1e7a36" : "#c0182a";
-
-    arc(OB, TI, a0, a1, bw);   // inner single
-    arc(TO, DI, a0, a1, bw);   // outer single
-    arc(TI, TO, a0, a1, col);  // triple ring
-    arc(DI, DO, a0, a1, col);  // double ring
-  }}
-
-  // Divider lines
-  ctx.strokeStyle="rgba(0,0,0,0.7)"; ctx.lineWidth=1.5;
-  for (let i=0; i<20; i++) {{
-    const a = i*ANG_INC + ANG_OFF;
+  function arc(r0, r1, a0, a1, fill) {{
     ctx.beginPath();
-    ctx.moveTo(CX, CY);
-    ctx.lineTo(CX+DO*Math.cos(a), CY+DO*Math.sin(a));
-    ctx.stroke();
+    if (r0 > 0) {{
+      ctx.arc(CX, CY, r0, a0, a1);
+      ctx.arc(CX, CY, r1, a1, a0, true);
+    }} else {{
+      ctx.moveTo(CX, CY);
+      ctx.arc(CX, CY, r1, a0, a1);
+    }}
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
   }}
 
-  // Ring outline borders
-  [OB, TI, TO, DI, DO].forEach(r => {{
-    ctx.beginPath(); ctx.arc(CX,CY,r,0,2*Math.PI);
-    ctx.strokeStyle="rgba(0,0,0,0.55)"; ctx.lineWidth=2; ctx.stroke();
-  }});
+  function draw() {{
+    ctx.clearRect(0, 0, {CANVAS_W}, {CANVAS_H});
+    ctx.fillStyle = "#0e0e0e";
+    ctx.fillRect(0, 0, {CANVAS_W}, {CANVAS_H});
 
-  // Outer bull (green)
-  ctx.beginPath(); ctx.arc(CX,CY,OB,0,2*Math.PI);
-  ctx.fillStyle="#1e7a36"; ctx.fill();
-  ctx.strokeStyle="rgba(0,0,0,0.5)"; ctx.lineWidth=1.5; ctx.stroke();
+    // Outer miss ring
+    ctx.beginPath(); ctx.arc(CX, CY, DO+22, 0, 2*Math.PI);
+    ctx.fillStyle="#1a1a1a"; ctx.fill();
 
-  // Inner bull (red / bullseye)
-  ctx.beginPath(); ctx.arc(CX,CY,IB,0,2*Math.PI);
-  ctx.fillStyle="#c0182a"; ctx.fill();
+    for (let i=0; i<20; i++) {{
+      const a0   = i*ANG_INC + ANG_OFF;
+      const a1   = (i+1)*ANG_INC + ANG_OFF;
+      const even = (i%2===0);
+      const bw   = even ? "#2a2a2a" : "#e8e0cc";
+      const col  = even ? "#1e7a36" : "#c0182a";
+      arc(OB, TI, a0, a1, bw);
+      arc(TO, DI, a0, a1, bw);
+      arc(TI, TO, a0, a1, col);
+      arc(DI, DO, a0, a1, col);
+    }}
 
-  // Number labels
-  ctx.font="bold 17px Arial, sans-serif";
-  ctx.textAlign="center"; ctx.textBaseline="middle";
-  for (let i=0; i<20; i++) {{
-    const a = (i+0.5)*ANG_INC + ANG_OFF;
-    ctx.fillStyle="white";
-    ctx.fillText(SEGS[i], CX+LABEL_DIST*Math.cos(a), CY+LABEL_DIST*Math.sin(a));
+    // Divider lines
+    ctx.strokeStyle="rgba(0,0,0,0.7)"; ctx.lineWidth=1.5;
+    for (let i=0; i<20; i++) {{
+      const a = i*ANG_INC + ANG_OFF;
+      ctx.beginPath();
+      ctx.moveTo(CX, CY);
+      ctx.lineTo(CX + DO*Math.cos(a), CY + DO*Math.sin(a));
+      ctx.stroke();
+    }}
+
+    // Ring outlines
+    [OB, TI, TO, DI, DO].forEach(r => {{
+      ctx.beginPath(); ctx.arc(CX, CY, r, 0, 2*Math.PI);
+      ctx.strokeStyle="rgba(0,0,0,0.55)"; ctx.lineWidth=2; ctx.stroke();
+    }});
+
+    // Outer bull
+    ctx.beginPath(); ctx.arc(CX, CY, OB, 0, 2*Math.PI);
+    ctx.fillStyle="#1e7a36"; ctx.fill();
+    ctx.strokeStyle="rgba(0,0,0,0.5)"; ctx.lineWidth=1.5; ctx.stroke();
+
+    // Inner bull (bullseye)
+    ctx.beginPath(); ctx.arc(CX, CY, IB, 0, 2*Math.PI);
+    ctx.fillStyle="#c0182a"; ctx.fill();
+
+    // Number labels
+    ctx.font="bold 17px Arial, sans-serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    for (let i=0; i<20; i++) {{
+      const a = (i + 0.5)*ANG_INC + ANG_OFF;
+      ctx.fillStyle="white";
+      ctx.fillText(SEGS[i], CX + LABEL_R*Math.cos(a), CY + LABEL_R*Math.sin(a));
+    }}
+
+    // Click markers
+    const clicks = {click_json};
+    clicks.forEach(c => {{
+      // c.xOff and c.yOff stored as canvas-relative offsets (Y down)
+      const px = CX + c.xOff;
+      const py = CY + c.yOff;
+      const col = c.type === "Target" ? "#ffe033" : "#ff8c00";
+      const s = 11;
+      ctx.lineWidth=3; ctx.strokeStyle=col;
+      ctx.beginPath(); ctx.moveTo(px-s,py-s); ctx.lineTo(px+s,py+s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(px+s,py-s); ctx.lineTo(px-s,py+s); ctx.stroke();
+      ctx.beginPath(); ctx.arc(px, py, 4, 0, 2*Math.PI);
+      ctx.fillStyle=col; ctx.fill();
+    }});
   }}
 
-  // Click markers
-  const clicks = {click_json};
-  clicks.forEach(c => {{
-    const px = CX + c.xOff;
-    const py = CY - c.yOff;
-    const col = c.type === "Target" ? "#ffe033" : "#ff8c00";
-    const s = 11;
-    ctx.lineWidth=3; ctx.strokeStyle=col;
-    ctx.beginPath(); ctx.moveTo(px-s,py-s); ctx.lineTo(px+s,py+s); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(px+s,py-s); ctx.lineTo(px-s,py+s); ctx.stroke();
-    ctx.beginPath(); ctx.arc(px,py,4,0,2*Math.PI);
-    ctx.fillStyle=col; ctx.fill();
+  draw();
+
+  cv.addEventListener("click", function(e) {{
+    const rect = cv.getBoundingClientRect();
+    const sx = cv.width  / rect.width;
+    const sy = cv.height / rect.height;
+    const mx = (e.clientX - rect.left) * sx;
+    const my = (e.clientY - rect.top)  * sy;
+    // xOff/yOff as canvas offsets from centre (Y increases downward)
+    const xOff = mx - CX;
+    const yOff = my - CY;
+    Streamlit.setTriggerValue({{
+      xOff: Math.round(xOff * 100) / 100,
+      yOff: Math.round(yOff * 100) / 100
+    }});
   }});
-}}
 
-draw();
-
-cv.addEventListener("click", function(e) {{
-  const rect = cv.getBoundingClientRect();
-  const sx = cv.width  / rect.width;
-  const sy = cv.height / rect.height;
-  const mx = (e.clientX - rect.left)  * sx;
-  const my = (e.clientY - rect.top)   * sy;
-  const xOff =  (mx - CX);
-  const yOff = -(my - CY);
-  window.parent.postMessage({{
-    type: "streamlit:setComponentValue",
-    value: {{xOff: Math.round(xOff*100)/100, yOff: Math.round(yOff*100)/100}}
-  }}, "*");
-}});
+  Streamlit.sendRenderEvent();
 </script>
 </body>
 </html>"""
@@ -319,10 +345,17 @@ if click_data and isinstance(click_data, dict) and "xOff" in click_data:
     ck = (round(click_data["xOff"], 1), round(click_data["yOff"], 1))
     if st.session_state["last_click"] != ck:
         st.session_state["last_click"] = ck
-        xd = click_data["xOff"]
-        yd = click_data["yOff"]
-        dist  = math.sqrt(xd**2 + yd**2)
-        angle = math.degrees(math.atan2(yd, xd))
+
+        xd = click_data["xOff"]   # canvas x offset (right = positive)
+        yd = click_data["yOff"]   # canvas y offset (down = positive)
+
+        # Distance from centre — same in both coordinate systems
+        dist = math.sqrt(xd**2 + yd**2)
+
+        # Convert to pygame-style angle: flip Y so up=positive, then atan2
+        # pygame: angle = degrees(atan2(y_diff, x_diff)) where y_diff = centre - my (up positive)
+        pygame_y = -yd   # flip Y to match pygame convention
+        angle = math.degrees(math.atan2(pygame_y, xd))
         if angle < 0:
             angle += 360
 
@@ -333,13 +366,15 @@ if click_data and isinstance(click_data, dict) and "xOff" in click_data:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if st.session_state["recording_target"]:
+            # Store x_diff/y_diff in pygame convention (Y up) for CSV compatibility
             st.session_state["current_target_data"] = [
-                now, seg, mod, xd, yd,
+                now, seg, mod, xd, pygame_y,
                 None, None, None, None,
                 st.session_state["inputuser"],
                 st.session_state["inputmode"],
                 0
             ]
+            # Store canvas offsets for marker drawing (Y down)
             st.session_state["click_positions"].append(
                 {"type": "Target", "xOff": xd, "yOff": yd}
             )
@@ -351,13 +386,14 @@ if click_data and isinstance(click_data, dict) and "xOff" in click_data:
             td[5]  = seg
             td[6]  = mod
             td[7]  = xd
-            td[8]  = yd
+            td[8]  = pygame_y
             td[9]  = st.session_state["inputuser"]
             td[10] = st.session_state["inputmode"]
             td[11] = session_num
 
+            # Miss calculation in pygame convention (Y up) — matches original script
             x_miss = (td[3] - xd) * -1
-            y_miss = (td[4] - yd) * -1
+            y_miss = (td[4] - pygame_y) * -1
             st.session_state["x_miss_list"].append(x_miss)
             st.session_state["y_miss_list"].append(y_miss)
             total_miss = round(math.sqrt(x_miss**2 + y_miss**2), 0)
@@ -367,7 +403,7 @@ if click_data and isinstance(click_data, dict) and "xOff" in click_data:
                 st.session_state["hit_cnt"] += 1.0
             st.session_state["shot_cnt"] += 1.0
 
-            hit_perc = round(st.session_state["hit_cnt"] / st.session_state["shot_cnt"] * 100)
+            hit_perc  = round(st.session_state["hit_cnt"] / st.session_state["shot_cnt"] * 100)
             miss_label = "HIT ✅" if hit else "MISS ❌"
             st.session_state["display_text"] = (
                 f"Result: **{seg}{mod}** — {miss_label} — Miss distance: {total_miss}px"
@@ -380,9 +416,7 @@ if click_data and isinstance(click_data, dict) and "xOff" in click_data:
                 {"type": "Result", "xOff": xd, "yOff": yd}
             )
 
-            # ── Write to GitHub CSV ──
             append_row_to_github(td)
-
             st.session_state["recording_target"] = True
 
         st.rerun()
@@ -401,8 +435,8 @@ with c2:
     if st.session_state["x_miss_list"]:
         xl = st.session_state["x_miss_list"]
         yl = st.session_state["y_miss_list"]
-        st.markdown(f"X Miss Avg: **{round(sum(xl)/len(xl),2)}px**")
-        st.markdown(f"Y Miss Avg: **{round(sum(yl)/len(yl),2)}px**")
+        st.markdown(f"X Miss Avg: **{round(sum(xl)/len(xl), 2)}px**")
+        st.markdown(f"Y Miss Avg: **{round(sum(yl)/len(yl), 2)}px**")
     st.caption(f"Session #{session_num}")
 
 with c3:
