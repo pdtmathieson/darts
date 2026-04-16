@@ -36,6 +36,14 @@ CSV_COLUMNS = [
     "Name", "Mode", "Session"
 ]
 
+OUTER_R      = 300
+inner_bull_r = OUTER_R * (6.35  / 170)
+outer_bull_r = OUTER_R * (16    / 170)
+triple_inner = OUTER_R * (99    / 170)
+triple_outer = OUTER_R * (107   / 170)
+double_inner = OUTER_R * (162   / 170)
+double_outer = float(OUTER_R)
+
 # ─── GitHub CSV helpers ───────────────────────────────────────────────────────
 def load_csv_from_github() -> pd.DataFrame:
     try:
@@ -88,42 +96,41 @@ def determine_segment(angle_deg: float) -> int:
     return segment_order[idx]
 
 
-def determine_modifier(dist, dbl_in, dbl_out, tri_in, tri_out, ibull, obull) -> str:
-    if dist <= ibull:
+def determine_modifier(dist) -> str:
+    if dist <= inner_bull_r:
         return "+"
-    elif dist <= obull:
+    elif dist <= outer_bull_r:
         return "*"
-    elif dbl_in <= dist <= dbl_out:
+    elif double_inner <= dist <= double_outer:
         return "D"
-    elif tri_in <= dist <= tri_out:
+    elif triple_inner <= dist <= triple_outer:
         return "T"
-    elif dist > dbl_out:
+    elif dist > double_outer:
         return "M"
     else:
         return "S"
 
 
 # ─── Session state init ───────────────────────────────────────────────────────
-def init_state():
-    defaults = {
-        "recording_target": True,
-        "current_target_data": None,
-        "hit_cnt": 0.0,
-        "shot_cnt": 0.0,
-        "x_miss_list": [],
-        "y_miss_list": [],
-        "display_text": "",
-        "display_perc": "",
-        "click_positions": [],
-        "session_num": None,
-        "last_click": None,
-        "df_loaded": False,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-init_state()
+defaults = {
+    "recording_target": True,
+    "current_target_data": None,
+    "hit_cnt": 0.0,
+    "shot_cnt": 0.0,
+    "x_miss_list": [],
+    "y_miss_list": [],
+    "display_text": "",
+    "display_perc": "",
+    "click_positions": [],
+    "session_num": None,
+    "last_click": None,
+    "df_loaded": False,
+    "pending_xoff": None,
+    "pending_yoff": None,
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 if not st.session_state["df_loaded"]:
     df_existing = load_csv_from_github()
@@ -138,41 +145,59 @@ if not st.session_state["df_loaded"]:
 
 session_num = st.session_state["session_num"]
 
-# ─── Read click from query params (set by JS) ─────────────────────────────────
-# JS writes ?click=xOff,yOff to the URL; Python reads it here before rendering UI
-qp = st.query_params
-if "click" in qp:
+# ─── Top controls ─────────────────────────────────────────────────────────────
+col_name, col_mode, col_prompt = st.columns([2, 2, 5])
+with col_name:
+    inputuser = st.text_input("Name", value="Patrick", key="inputuser")
+with col_mode:
+    inputmode = st.selectbox("Mode", ["RTW", "Points"], key="inputmode")
+with col_prompt:
+    st.markdown("<div style='padding-top:28px'>", unsafe_allow_html=True)
+    if st.session_state["recording_target"]:
+        st.info("🎯 Click the board to set **TARGET**")
+    else:
+        st.warning("🎯 Click the board to set **RESULT**")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ─── Hidden number inputs — JS writes here, Streamlit reads on rerun ─────────
+# We use st.number_input with a unique key that JS targets via the DOM label.
+# A cleaner approach: use a plain st.text_input hidden behind CSS, updated by JS.
+
+click_xoff = st.session_state.get("pending_xoff")
+click_yoff = st.session_state.get("pending_yoff")
+
+# Render two hidden text inputs that JS will populate and trigger change on
+xoff_val = st.text_input("_xoff", value="", key="xoff_input",
+                          label_visibility="collapsed")
+yoff_val = st.text_input("_yoff", value="", key="yoff_input",
+                          label_visibility="collapsed")
+
+# ─── Process a pending click ─────────────────────────────────────────────────
+if xoff_val and yoff_val:
     try:
-        raw = qp["click"]
-        parts = raw.split(",")
-        xd = float(parts[0])
-        yd = float(parts[1])
+        xd = float(xoff_val)
+        yd = float(yoff_val)
         ck = (round(xd, 1), round(yd, 1))
 
         if st.session_state["last_click"] != ck:
             st.session_state["last_click"] = ck
 
-            dist = math.sqrt(xd**2 + yd**2)
-            # yd from canvas is Y-down; flip for angle calculation (up = positive)
-            pygame_y = -yd
-            angle = math.degrees(math.atan2(pygame_y, xd))
+            dist     = math.sqrt(xd**2 + yd**2)
+            pygame_y = -yd  # flip Y: canvas Y-down → up-positive for angle calc
+            angle    = math.degrees(math.atan2(pygame_y, xd))
             if angle < 0:
                 angle += 360
 
             seg = determine_segment(angle)
-            OUTER_R = 300
-            mod = determine_modifier(dist,
-                OUTER_R*(162/170), float(OUTER_R),
-                OUTER_R*(99/170),  OUTER_R*(107/170),
-                OUTER_R*(6.35/170), OUTER_R*(16/170))
+            mod = determine_modifier(dist)
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             if st.session_state["recording_target"]:
                 st.session_state["current_target_data"] = [
                     now, seg, mod, xd, pygame_y,
                     None, None, None, None,
-                    qp.get("name", "Patrick3"),
-                    qp.get("mode", "RTW"),
+                    st.session_state["inputuser"],
+                    st.session_state["inputmode"],
                     0
                 ]
                 st.session_state["click_positions"].append(
@@ -182,13 +207,13 @@ if "click" in qp:
                 st.session_state["recording_target"] = False
 
             else:
-                td = st.session_state["current_target_data"]
+                td     = st.session_state["current_target_data"]
                 td[5]  = seg
                 td[6]  = mod
                 td[7]  = xd
                 td[8]  = pygame_y
-                td[9]  = qp.get("name", "Patrick3")
-                td[10] = qp.get("mode", "RTW")
+                td[9]  = st.session_state["inputuser"]
+                td[10] = st.session_state["inputmode"]
                 td[11] = session_num
 
                 x_miss = (td[3] - xd) * -1
@@ -217,55 +242,25 @@ if "click" in qp:
                 append_row_to_github(td)
                 st.session_state["recording_target"] = True
 
-        # Clear param so it doesn't re-fire on next natural rerun
-        st.query_params.clear()
-    except Exception:
-        st.query_params.clear()
+            # Clear the inputs for next click
+            st.session_state["xoff_input"] = ""
+            st.session_state["yoff_input"] = ""
+            st.rerun()
+    except (ValueError, TypeError):
+        pass
 
-# ─── Top controls ─────────────────────────────────────────────────────────────
-col_name, col_mode, col_prompt = st.columns([2, 2, 5])
-with col_name:
-    inputuser = st.text_input("Name", value="Patrick3", key="inputuser")
-with col_mode:
-    inputmode = st.selectbox("Mode", ["RTW", "Points"], key="inputmode")
-with col_prompt:
-    st.markdown("<div style='padding-top:28px'>", unsafe_allow_html=True)
-    if st.session_state["recording_target"]:
-        st.info("🎯 Click the board to set **TARGET**")
-    else:
-        st.warning("🎯 Click the board to set **RESULT**")
-    st.markdown("</div>", unsafe_allow_html=True)
+# ─── Board geometry & canvas ──────────────────────────────────────────────────
+CANVAS_W  = 720
+CANVAS_H  = 720
+click_json = json.dumps(st.session_state["click_positions"])
 
-# ─── Board geometry ───────────────────────────────────────────────────────────
-OUTER_RADIUS = 300
-CANVAS_W     = 720
-CANVAS_H     = 720
-
-inner_bull_r = OUTER_RADIUS * (6.35  / 170)
-outer_bull_r = OUTER_RADIUS * (16    / 170)
-triple_inner = OUTER_RADIUS * (99    / 170)
-triple_outer = OUTER_RADIUS * (107   / 170)
-double_inner = OUTER_RADIUS * (162   / 170)
-double_outer = float(OUTER_RADIUS)
-
-click_json    = json.dumps(st.session_state["click_positions"])
-inputuser_js  = json.dumps(st.session_state.get("inputuser", "Patrick3"))
-inputmode_js  = json.dumps(st.session_state.get("inputmode", "RTW"))
-
-# ─── Dartboard HTML ───────────────────────────────────────────────────────────
-# Orientation: 20 at top, 3 at bottom, 6 on RIGHT, 11 on LEFT
-# Standard dartboard goes clockwise: 20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5
-# In canvas (Y-down), clockwise = positive angle direction
-# ANG_OFF = -PI/2 - PI/20  puts the LEFT edge of segment 20 at top,
-# so the CENTRE of segment 20 is at -PI/2 (straight up). Clockwise from there:
-# 1,18,4,13,6(right),10,15,2,17,3(bottom),19,7,16,8,11(left),14,9,12,5 — correct!
 dartboard_html = f"""<!DOCTYPE html>
 <html>
 <head>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:#0e0e0e; display:flex; justify-content:center;
-          align-items:center; height:{CANVAS_H+10}px; }}
+  body {{ background:#0e0e0e; display:flex; flex-direction:column;
+          justify-content:center; align-items:center; height:{CANVAS_H+10}px; }}
   canvas {{ cursor:crosshair; }}
 </style>
 </head>
@@ -275,18 +270,16 @@ dartboard_html = f"""<!DOCTYPE html>
   const cv  = document.getElementById("c");
   const ctx = cv.getContext("2d");
   const CX  = {CANVAS_W}/2, CY = {CANVAS_H}/2;
-  const R   = {OUTER_RADIUS};
+  const R   = {OUTER_R};
 
   const IB = R*(6.35/170), OB = R*(16/170);
   const TI = R*(99/170),   TO = R*(107/170);
   const DI = R*(162/170),  DO = R;
 
-  // Standard dartboard clockwise order starting from segment at top
   const SEGS    = [20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
-  // -PI/2 aligns 12 o'clock; -PI/20 shifts so 20 is centred at top
-  const ANG_OFF  = -Math.PI/2 - Math.PI/20;
-  const ANG_INC  = 2*Math.PI/20;
-  const LABEL_R  = DO + 26;
+  const ANG_OFF = -Math.PI/2 - Math.PI/20;
+  const ANG_INC = 2*Math.PI/20;
+  const LABEL_R = DO + 26;
 
   function arc(r0, r1, a0, a1, fill) {{
     ctx.beginPath();
@@ -308,12 +301,12 @@ dartboard_html = f"""<!DOCTYPE html>
     ctx.fillRect(0, 0, {CANVAS_W}, {CANVAS_H});
 
     ctx.beginPath(); ctx.arc(CX, CY, DO+22, 0, 2*Math.PI);
-    ctx.fillStyle="#1a1a1a"; ctx.fill();
+    ctx.fillStyle = "#1a1a1a"; ctx.fill();
 
-    for (let i=0; i<20; i++) {{
+    for (let i = 0; i < 20; i++) {{
       const a0   = i*ANG_INC + ANG_OFF;
       const a1   = (i+1)*ANG_INC + ANG_OFF;
-      const even = (i%2===0);
+      const even = (i%2 === 0);
       const bw   = even ? "#2a2a2a" : "#e8e0cc";
       const col  = even ? "#1e7a36" : "#c0182a";
       arc(OB, TI, a0, a1, bw);
@@ -322,8 +315,8 @@ dartboard_html = f"""<!DOCTYPE html>
       arc(DI, DO, a0, a1, col);
     }}
 
-    ctx.strokeStyle="rgba(0,0,0,0.7)"; ctx.lineWidth=1.5;
-    for (let i=0; i<20; i++) {{
+    ctx.strokeStyle = "rgba(0,0,0,0.7)"; ctx.lineWidth = 1.5;
+    for (let i = 0; i < 20; i++) {{
       const a = i*ANG_INC + ANG_OFF;
       ctx.beginPath();
       ctx.moveTo(CX, CY);
@@ -333,61 +326,84 @@ dartboard_html = f"""<!DOCTYPE html>
 
     [OB, TI, TO, DI, DO].forEach(r => {{
       ctx.beginPath(); ctx.arc(CX, CY, r, 0, 2*Math.PI);
-      ctx.strokeStyle="rgba(0,0,0,0.55)"; ctx.lineWidth=2; ctx.stroke();
+      ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.lineWidth = 2; ctx.stroke();
     }});
 
     ctx.beginPath(); ctx.arc(CX, CY, OB, 0, 2*Math.PI);
-    ctx.fillStyle="#1e7a36"; ctx.fill();
-    ctx.strokeStyle="rgba(0,0,0,0.5)"; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle = "#1e7a36"; ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 1.5; ctx.stroke();
 
     ctx.beginPath(); ctx.arc(CX, CY, IB, 0, 2*Math.PI);
-    ctx.fillStyle="#c0182a"; ctx.fill();
+    ctx.fillStyle = "#c0182a"; ctx.fill();
 
-    ctx.font="bold 17px Arial, sans-serif";
-    ctx.textAlign="center"; ctx.textBaseline="middle";
-    for (let i=0; i<20; i++) {{
+    ctx.font = "bold 17px Arial, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let i = 0; i < 20; i++) {{
       const a = (i + 0.5)*ANG_INC + ANG_OFF;
-      ctx.fillStyle="white";
+      ctx.fillStyle = "white";
       ctx.fillText(SEGS[i], CX + LABEL_R*Math.cos(a), CY + LABEL_R*Math.sin(a));
     }}
 
-    // Click markers
     const clicks = {click_json};
     clicks.forEach(c => {{
-      const px = CX + c.xOff;
-      const py = CY + c.yOff;
+      const px  = CX + c.xOff;
+      const py  = CY + c.yOff;
       const col = c.type === "Target" ? "#ffe033" : "#ff8c00";
-      const s = 11;
-      ctx.lineWidth=3; ctx.strokeStyle=col;
+      const s   = 11;
+      ctx.lineWidth = 3; ctx.strokeStyle = col;
       ctx.beginPath(); ctx.moveTo(px-s,py-s); ctx.lineTo(px+s,py+s); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(px+s,py-s); ctx.lineTo(px-s,py+s); ctx.stroke();
       ctx.beginPath(); ctx.arc(px, py, 4, 0, 2*Math.PI);
-      ctx.fillStyle=col; ctx.fill();
+      ctx.fillStyle = col; ctx.fill();
     }});
   }}
 
   draw();
 
+  // ── Click handler: find Streamlit text inputs in parent and set values ──
   cv.addEventListener("click", function(e) {{
     const rect = cv.getBoundingClientRect();
-    const sx = cv.width  / rect.width;
-    const sy = cv.height / rect.height;
+    const sx   = cv.width  / rect.width;
+    const sy   = cv.height / rect.height;
     const xOff = Math.round(((e.clientX - rect.left) * sx - CX) * 100) / 100;
     const yOff = Math.round(((e.clientY - rect.top)  * sy - CY) * 100) / 100;
-    // Use fetch to set query param and trigger Streamlit rerun
-    const name = {inputuser_js};
-    const mode = {inputmode_js};
-    const url  = window.location.pathname +
-                 "?click=" + xOff + "%2C" + yOff +
-                 "&name="  + encodeURIComponent(name) +
-                 "&mode="  + encodeURIComponent(mode);
-    window.parent.location.href = url;
+
+    // Walk up to the parent Streamlit document and find the hidden inputs
+    try {{
+      const doc    = window.parent.document;
+      const inputs = doc.querySelectorAll('input[type="text"]');
+      let xInput   = null;
+      let yInput   = null;
+
+      // The inputs have aria-labels matching our label text
+      inputs.forEach(inp => {{
+        const label = inp.getAttribute('aria-label') || '';
+        if (label === '_xoff') xInput = inp;
+        if (label === '_yoff') yInput = inp;
+      }});
+
+      if (xInput && yInput) {{
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.parent.HTMLInputElement.prototype, 'value'
+        ).set;
+        nativeInputValueSetter.call(xInput, String(xOff));
+        nativeInputValueSetter.call(yInput, String(yOff));
+        xInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        yInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+
+        // Submit the form by pressing Enter on the last input
+        yInput.dispatchEvent(new KeyboardEvent('keydown', {{
+          key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+        }}));
+      }}
+    }} catch(err) {{
+      console.warn("Could not reach parent inputs:", err);
+    }}
   }});
 </script>
 </body>
 </html>"""
 
-# ─── Render board ─────────────────────────────────────────────────────────────
 components.html(dartboard_html, height=CANVAS_H + 20, scrolling=False)
 
 # ─── Stats bar ────────────────────────────────────────────────────────────────
@@ -412,13 +428,14 @@ with c3:
     if st.button("🔄 Reset Markers", use_container_width=True):
         st.session_state["click_positions"] = []
         st.session_state["recording_target"] = True
-        st.session_state["display_text"] = ""
-        st.session_state["display_perc"] = ""
-        st.session_state["last_click"] = None
+        st.session_state["display_text"]     = ""
+        st.session_state["display_perc"]     = ""
+        st.session_state["last_click"]       = None
         st.rerun()
     if st.button("🆕 New Session", use_container_width=True):
         for k in ["recording_target","current_target_data","hit_cnt","shot_cnt",
                   "x_miss_list","y_miss_list","display_text","display_perc",
-                  "click_positions","last_click","df_loaded","session_num"]:
+                  "click_positions","last_click","df_loaded","session_num",
+                  "xoff_input","yoff_input"]:
             st.session_state.pop(k, None)
         st.rerun()
