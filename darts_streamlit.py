@@ -171,7 +171,7 @@ if "click" in qp:
                 st.session_state["current_target_data"] = [
                     now, seg, mod, xd, pygame_y,
                     None, None, None, None,
-                    qp.get("name", "Patrick"),
+                    qp.get("name", "Patrick3"),
                     qp.get("mode", "RTW"),
                     0
                 ]
@@ -225,7 +225,7 @@ if "click" in qp:
 # ─── Top controls ─────────────────────────────────────────────────────────────
 col_name, col_mode, col_prompt = st.columns([2, 2, 5])
 with col_name:
-    inputuser = st.text_input("Name", value="Patrick", key="inputuser")
+    inputuser = st.text_input("Name", value="Patrick3", key="inputuser")
 with col_mode:
     inputmode = st.selectbox("Mode", ["RTW", "Points"], key="inputmode")
 with col_prompt:
@@ -249,7 +249,7 @@ double_inner = OUTER_RADIUS * (162   / 170)
 double_outer = float(OUTER_RADIUS)
 
 click_json    = json.dumps(st.session_state["click_positions"])
-inputuser_js  = json.dumps(st.session_state.get("inputuser", "Patrick"))
+inputuser_js  = json.dumps(st.session_state.get("inputuser", "Patrick3"))
 inputmode_js  = json.dumps(st.session_state.get("inputmode", "RTW"))
 
 # ─── Dartboard HTML ───────────────────────────────────────────────────────────
