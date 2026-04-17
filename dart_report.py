@@ -132,15 +132,16 @@ def render_sidebar(df):
     st.sidebar.markdown("### Filters")
 
     players = sorted(df["Name"].dropna().unique().tolist())
-    selected_player = st.sidebar.selectbox("Player", ["All"] + players)
+    selected_players = st.sidebar.multiselect("Player", players, default=players)
 
     modes = sorted(df["Mode"].dropna().unique().tolist())
-    selected_mode = st.sidebar.selectbox("Mode", ["All"] + modes)
+    selected_modes = st.sidebar.multiselect("Mode", modes, default=modes)
 
     sessions = sorted(df["Session"].unique().tolist())
-    session_options = ["All"] + [f"Session {s}" for s in sessions]
-    selected_session_label = st.sidebar.selectbox("Session", session_options)
-    selected_session = None if selected_session_label == "All" else int(selected_session_label.split(" ")[1])
+    selected_sessions = st.sidebar.multiselect(
+        "Session", sessions, default=sessions,
+        format_func=lambda s: f"Session {s}"
+    )
 
     dates = sorted(df["Date"].unique())
     if len(dates) > 1:
@@ -154,17 +155,17 @@ def render_sidebar(df):
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Data last fetched: {datetime.now().strftime('%H:%M:%S')}")
 
-    return selected_player, selected_mode, selected_session, date_range
+    return selected_players, selected_modes, selected_sessions, date_range
 
 
-def apply_filters(df, player, mode, session, date_range):
+def apply_filters(df, players, modes, sessions, date_range):
     f = df.copy()
-    if player != "All":
-        f = f[f["Name"] == player]
-    if mode != "All":
-        f = f[f["Mode"] == mode]
-    if session is not None:
-        f = f[f["Session"] == session]
+    if players:
+        f = f[f["Name"].isin(players)]
+    if modes:
+        f = f[f["Mode"].isin(modes)]
+    if sessions:
+        f = f[f["Session"].isin(sessions)]
     try:
         start, end = date_range[0], date_range[-1]
         f = f[(f["Date"] >= start) & (f["Date"] <= end)]
@@ -349,9 +350,35 @@ def tab_accuracy(df):
         st.info(f"Heatmap requires data across multiple sessions. ({e})")
 
 
+def px_to_mm_scale(df):
+    all_distances = np.sqrt(
+        df["Result X Offset"] ** 2 + df["Result Y Offset"] ** 2
+    )
+    non_miss = all_distances[df["Result Modifier"] != "M"]
+    if len(non_miss) < 5:
+        non_miss = all_distances
+    outer_radius_px = float(np.percentile(non_miss, 99))
+    if outer_radius_px < 1:
+        outer_radius_px = 1.0
+    return 170.0 / outer_radius_px
+
+
 def tab_scatter(df):
     st.subheader("Throw Positions — Where Darts Actually Land")
-    st.caption("X/Y = mm from board centre. Green = hit, Red = miss.")
+
+    scale = px_to_mm_scale(df)
+
+    plot_df = df.copy()
+    plot_df["Result X mm"] = (plot_df["Result X Offset"] * scale).round(1)
+    plot_df["Result Y mm"] = (plot_df["Result Y Offset"] * scale).round(1)
+    plot_df["Target X mm"] = (plot_df["Target X Offset"] * scale).round(1)
+    plot_df["Target Y mm"] = (plot_df["Target Y Offset"] * scale).round(1)
+
+    st.caption(
+        f"Coordinates converted to mm from board centre "
+        f"(scale factor: {scale:.4f} mm/px). "
+        f"Green = hit, Red = miss. Ring overlays show real dartboard zones."
+    )
 
     target_options = sorted(
         df["Target Segment"].unique().tolist(),
@@ -359,7 +386,6 @@ def tab_scatter(df):
     )
     selected_seg = st.selectbox("Filter by Target Segment", ["All"] + [str(s) for s in target_options])
 
-    plot_df = df.copy()
     if selected_seg != "All":
         plot_df = plot_df[plot_df["Target Segment"].astype(str) == selected_seg]
 
@@ -367,52 +393,68 @@ def tab_scatter(df):
 
     fig = px.scatter(
         plot_df,
-        x="Result X Offset",
-        y="Result Y Offset",
+        x="Result X mm",
+        y="Result Y mm",
         color="hit_label",
         color_discrete_map={"Hit": COLORS["hit"], "Miss": COLORS["miss"]},
         hover_data=["Name", "Target Segment", "Target Modifier",
                     "Result Segment", "Result Modifier", "Score", "Session"],
         opacity=0.65,
         labels={
-            "Result X Offset": "X (mm)",
-            "Result Y Offset": "Y (mm)",
+            "Result X mm": "X (mm from centre)",
+            "Result Y mm": "Y (mm from centre)",
             "hit_label": "Result",
         },
     )
 
-    theta = np.linspace(0, 2 * np.pi, 200)
-    for r in [6.35, 15.9, 99, 107, 162, 170]:
+    theta = np.linspace(0, 2 * np.pi, 300)
+    ring_labels = [
+        (6.35, "Bull"),
+        (15.9, "Bull socket outer"),
+        (99.0, "Single/Triple inner"),
+        (107.0, "Triple outer"),
+        (162.0, "Double inner"),
+        (170.0, "Board edge"),
+    ]
+    for r, label in ring_labels:
         fig.add_trace(go.Scatter(
-            x=r * np.cos(theta), y=r * np.sin(theta),
+            x=r * np.cos(theta),
+            y=r * np.sin(theta),
             mode="lines",
-            line=dict(color="rgba(255,255,255,0.15)", width=1, dash="dot"),
+            line=dict(color="rgba(255,255,255,0.18)", width=1, dash="dot"),
             showlegend=False,
             hoverinfo="skip",
+            name=label,
         ))
 
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="rgba(255,255,255,0.05)", zeroline=False),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zeroline=False, scaleanchor="x"),
-        height=560,
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.05)", zeroline=False,
+            range=[-200, 200], title="X (mm from centre)",
+        ),
+        yaxis=dict(
+            gridcolor="rgba(255,255,255,0.05)", zeroline=False,
+            scaleanchor="x", range=[-200, 200], title="Y (mm from centre)",
+        ),
+        height=580,
         margin=dict(t=10),
     )
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Distance from Target Centre (mm)")
-    df2 = df.copy()
-    df2["Distance"] = np.sqrt(
-        (df2["Result X Offset"] - df2["Target X Offset"]) ** 2 +
-        (df2["Result Y Offset"] - df2["Target Y Offset"]) ** 2
-    )
-    avg_dist = df2["Distance"].mean()
+    df2 = plot_df.copy()
+    df2["Distance mm"] = np.sqrt(
+        (df2["Result X mm"] - df2["Target X mm"]) ** 2 +
+        (df2["Result Y mm"] - df2["Target Y mm"]) ** 2
+    ).round(1)
+    avg_dist = df2["Distance mm"].mean()
 
     fig2 = px.histogram(
-        df2, x="Distance", nbins=30,
+        df2, x="Distance mm", nbins=30,
         color_discrete_sequence=[COLORS["secondary"]],
-        labels={"Distance": "Distance from target (mm)"},
+        labels={"Distance mm": "Distance from target (mm)"},
     )
     fig2.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
@@ -542,10 +584,10 @@ def tab_players(df):
     player_stats["Avg Score"] = player_stats["Avg_Score"].round(2)
 
     st.dataframe(
-        player_stats[[
-            "Name", "Throws", "Hits", "Misses",
-            "Accuracy (%)", "Avg Score", "Doubles", "Triples", "Sessions"
-        ]],
+        player_stats[
+            ["Name", "Throws", "Hits", "Misses",
+             "Accuracy (%)", "Avg Score", "Doubles", "Triples", "Sessions"]
+        ],
         use_container_width=True,
         hide_index=True,
     )
@@ -589,10 +631,10 @@ def tab_sessions(df):
     sess_stats = sess_stats.sort_values("Session", ascending=False)
 
     st.dataframe(
-        sess_stats[[
-            "Session", "Name", "Date", "Throws", "Hits",
-            "Misses", "Accuracy (%)", "Avg Score", "Modes"
-        ]],
+        sess_stats[
+            ["Session", "Name", "Date", "Throws", "Hits",
+             "Misses", "Accuracy (%)", "Avg Score", "Modes"]
+        ],
         use_container_width=True,
         hide_index=True,
     )
@@ -670,8 +712,8 @@ def main():
         st.warning("The CSV loaded but contains no data.")
         st.stop()
 
-    player, mode, session, date_range = render_sidebar(df)
-    filtered = apply_filters(df, player, mode, session, date_range)
+    players, modes, sessions, date_range = render_sidebar(df)
+    filtered = apply_filters(df, players, modes, sessions, date_range)
 
     st.title("🎯 Dart Tracker")
 
