@@ -56,7 +56,7 @@ def load_data_from_drive():
         creds_dict = dict(st.secrets["gcp_service_account"])
         file_id = st.secrets["drive"]["file_id"]
     except KeyError as e:
-        return None, [f"❌ Missing secret key: {e}. Check your secrets config has [gcp_service_account] and [drive] sections."]
+        return None, [f"Missing secret key: {e}. Check your secrets config has [gcp_service_account] and [drive] sections."]
 
     try:
         creds = service_account.Credentials.from_service_account_info(
@@ -64,12 +64,12 @@ def load_data_from_drive():
             scopes=["https://www.googleapis.com/auth/drive.readonly"],
         )
     except Exception as e:
-        return None, [f"❌ Failed to build credentials: {e}\n\nCheck your private_key formatting — it needs real newlines, not \\\\n."]
+        return None, [f"Failed to build credentials: {e}. Check your private_key formatting — it needs real newlines, not escaped \\n characters."]
 
     try:
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        return None, [f"❌ Failed to connect to Google Drive API: {e}"]
+        return None, [f"Failed to connect to Google Drive API: {e}"]
 
     try:
         request = service.files().get_media(fileId=file_id)
@@ -82,16 +82,16 @@ def load_data_from_drive():
     except Exception as e:
         err_str = str(e)
         if "404" in err_str:
-            return None, ["❌ File not found (404). Check the file_id in your secrets and that the file is shared with the service account email."]
+            return None, ["File not found (404). Check the file_id in your secrets and that the file is shared with the service account email."]
         elif "403" in err_str:
-            return None, ["❌ Permission denied (403). Make sure you shared the CSV with the service account email as Viewer."]
+            return None, ["Permission denied (403). Make sure you shared the CSV with the service account email as Viewer."]
         else:
-            return None, [f"❌ Failed to download file: {e}"]
+            return None, [f"Failed to download file: {e}"]
 
     try:
         df = pd.read_csv(buffer)
     except Exception as e:
-        return None, [f"❌ Failed to parse CSV: {e}\n\nMake sure the file on Drive is a valid CSV."]
+        return None, [f"Failed to parse CSV: {e}. Make sure the file on Drive is a valid CSV."]
 
     expected = [
         "Timestamp", "Target Segment", "Target Modifier",
@@ -102,7 +102,7 @@ def load_data_from_drive():
     ]
     missing = [c for c in expected if c not in df.columns]
     if missing:
-        return None, [f"❌ CSV is missing columns: {missing}. Found: {list(df.columns)}"]
+        return None, [f"CSV is missing columns: {missing}. Found: {list(df.columns)}"]
 
     try:
         df["Timestamp"] = pd.to_datetime(df["Timestamp"])
@@ -110,7 +110,7 @@ def load_data_from_drive():
         for col in ["Target X Offset", "Target Y Offset", "Result X Offset", "Result Y Offset"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     except Exception as e:
-        return None, [f"❌ Type conversion error: {e}"]
+        return None, [f"Type conversion error: {e}"]
 
     df["Score"] = df.apply(lambda r: score_throw(r["Result Segment"], r["Result Modifier"]), axis=1)
     df["Hit"] = df.apply(lambda r: is_hit(r["Target Segment"], r["Result Segment"], r["Result Modifier"]), axis=1)
@@ -217,10 +217,13 @@ def tab_overview(df):
     )
     fig.update_traces(texttemplate="%{text:.0f}%", textposition="outside")
     fig.update_layout(
-        coloraxis_showscale=False, paper_bgcolor="rgba(0,0,0,0)",
+        coloraxis_showscale=False,
+        paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(range=[0, 115], gridcolor="rgba(255,255,255,0.05)"),
-        xaxis=dict(type="category"), height=400, margin=dict(t=20, b=40),
+        xaxis=dict(type="category"),
+        height=400,
+        margin=dict(t=20, b=40),
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -229,18 +232,32 @@ def tab_overview(df):
         st.subheader("Result Breakdown")
         mod_counts = df["Result Modifier Label"].value_counts().reset_index()
         mod_counts.columns = ["Modifier", "Count"]
-        fig2 = px.pie(mod_counts, names="Modifier", values="Count",
-                      color_discrete_sequence=px.colors.qualitative.Set2, hole=0.4)
-        fig2.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=320, margin=dict(t=10, b=10))
+        fig2 = px.pie(
+            mod_counts, names="Modifier", values="Count",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+            hole=0.4,
+        )
+        fig2.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            height=320,
+            margin=dict(t=10, b=10),
+        )
         st.plotly_chart(fig2, use_container_width=True)
 
     with col2:
         st.subheader("Score Distribution")
-        fig3 = px.histogram(df[df["Score"] > 0], x="Score", nbins=20,
-                            color_discrete_sequence=[COLORS["primary"]])
-        fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                           height=320, margin=dict(t=10, b=10), bargap=0.1)
+        fig3 = px.histogram(
+            df[df["Score"] > 0], x="Score", nbins=20,
+            color_discrete_sequence=[COLORS["primary"]],
+        )
+        fig3.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=320,
+            margin=dict(t=10, b=10),
+            bargap=0.1,
+        )
         st.plotly_chart(fig3, use_container_width=True)
 
 
@@ -255,18 +272,25 @@ def tab_accuracy(df):
             .reset_index()
         )
         sess_acc["Accuracy"] = (sess_acc["Hits"] / sess_acc["Throws"] * 100).round(1)
-        if len(sess_acc) >= 3:
-            sess_acc["Rolling Avg (3)"] = sess_acc["Accuracy"].rolling(3, min_periods=1).mean().round(1)
 
-        fig = px.line(sess_acc, x="Session", y="Accuracy", markers=True,
-                      color_discrete_sequence=[COLORS["primary"]])
-        if "Rolling Avg (3)" in sess_acc.columns:
-            fig.add_scatter(x=sess_acc["Session"], y=sess_acc["Rolling Avg (3)"],
-                            mode="lines", name="3-session avg",
-                            line=dict(dash="dash", color=COLORS["secondary"], width=2))
-        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                          yaxis=dict(range=[0, 105], gridcolor="rgba(255,255,255,0.05)"),
-                          height=350, margin=dict(t=10))
+        fig = px.line(
+            sess_acc, x="Session", y="Accuracy", markers=True,
+            color_discrete_sequence=[COLORS["primary"]],
+        )
+        if len(sess_acc) >= 3:
+            sess_acc["Rolling"] = sess_acc["Accuracy"].rolling(3, min_periods=1).mean().round(1)
+            fig.add_scatter(
+                x=sess_acc["Session"], y=sess_acc["Rolling"],
+                mode="lines", name="3-session avg",
+                line=dict(dash="dash", color=COLORS["secondary"], width=2),
+            )
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(range=[0, 105], gridcolor="rgba(255,255,255,0.05)"),
+            height=350,
+            margin=dict(t=10),
+        )
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
@@ -278,19 +302,27 @@ def tab_accuracy(df):
         )
         seg_stats["Accuracy"] = (seg_stats["Hits"] / seg_stats["Throws"] * 100).round(1)
         worst = seg_stats.nsmallest(10, "Accuracy").sort_values("Accuracy")
-        fig2 = px.bar(worst, x="Accuracy", y="Target Segment", orientation="h",
-                      color="Accuracy",
-                      color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
-                      range_color=[0, 100], text="Accuracy",
-                      labels={"Target Segment": "Segment", "Accuracy": "Hit Rate (%)"})
+
+        fig2 = px.bar(
+            worst, x="Accuracy", y="Target Segment", orientation="h",
+            color="Accuracy",
+            color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
+            range_color=[0, 100], text="Accuracy",
+            labels={"Target Segment": "Segment", "Accuracy": "Hit Rate (%)"},
+        )
         fig2.update_traces(texttemplate="%{text:.0f}%", textposition="outside")
-        fig2.update_layout(coloraxis_showscale=False, paper_bgcolor="rgba(0,0,0,0)",
-                           plot_bgcolor="rgba(0,0,0,0)", yaxis=dict(type="category"),
-                           xaxis=dict(range=[0, 115], gridcolor="rgba(255,255,255,0.05)"),
-                           height=350, margin=dict(t=10))
+        fig2.update_layout(
+            coloraxis_showscale=False,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(type="category"),
+            xaxis=dict(range=[0, 115], gridcolor="rgba(255,255,255,0.05)"),
+            height=350,
+            margin=dict(t=10),
+        )
         st.plotly_chart(fig2, use_container_width=True)
 
-    st.subheader("Accuracy Heatmap — Segment × Session")
+    st.subheader("Accuracy Heatmap — Segment x Session")
     pivot = (
         df.groupby(["Session", "Target Segment"])
         .agg(Throws=("Hit", "count"), Hits=("Hit", "sum"))
@@ -299,10 +331,19 @@ def tab_accuracy(df):
     pivot["Accuracy"] = (pivot["Hits"] / pivot["Throws"] * 100).round(1)
     try:
         heat = pivot.pivot(index="Target Segment", columns="Session", values="Accuracy")
-        fig3 = px.imshow(heat, color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
-                         range_color=[0, 100], aspect="auto", labels=dict(color="Accuracy %"))
-        fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           height=500, margin=dict(t=10))
+        fig3 = px.imshow(
+            heat,
+            color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
+            range_color=[0, 100],
+            aspect="auto",
+            labels=dict(color="Accuracy %"),
+        )
+        fig3.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            height=500,
+            margin=dict(t=10),
+        )
         st.plotly_chart(fig3, use_container_width=True)
     except Exception as e:
         st.info(f"Heatmap requires data across multiple sessions. ({e})")
@@ -325,13 +366,19 @@ def tab_scatter(df):
     plot_df["hit_label"] = plot_df["Hit"].map({True: "Hit", False: "Miss"})
 
     fig = px.scatter(
-        plot_df, x="Result X Offset", y="Result Y Offset",
+        plot_df,
+        x="Result X Offset",
+        y="Result Y Offset",
         color="hit_label",
         color_discrete_map={"Hit": COLORS["hit"], "Miss": COLORS["miss"]},
         hover_data=["Name", "Target Segment", "Target Modifier",
                     "Result Segment", "Result Modifier", "Score", "Session"],
         opacity=0.65,
-        labels={"Result X Offset": "X (mm)", "Result Y Offset": "Y (mm)", "hit_label": "Result"},
+        labels={
+            "Result X Offset": "X (mm)",
+            "Result Y Offset": "Y (mm)",
+            "hit_label": "Result",
+        },
     )
 
     theta = np.linspace(0, 2 * np.pi, 200)
@@ -340,30 +387,41 @@ def tab_scatter(df):
             x=r * np.cos(theta), y=r * np.sin(theta),
             mode="lines",
             line=dict(color="rgba(255,255,255,0.15)", width=1, dash="dot"),
-            showlegend=False, hoverinfo="skip",
+            showlegend=False,
+            hoverinfo="skip",
         ))
 
     fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
         xaxis=dict(gridcolor="rgba(255,255,255,0.05)", zeroline=False),
         yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zeroline=False, scaleanchor="x"),
-        height=560, margin=dict(t=10),
+        height=560,
+        margin=dict(t=10),
     )
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Distance from Target Centre (mm)")
     df2 = df.copy()
     df2["Distance"] = np.sqrt(
-        (df2["Result X Offset"] - df2["Target X Offset"])**2 +
-        (df2["Result Y Offset"] - df2["Target Y Offset"])**2
+        (df2["Result X Offset"] - df2["Target X Offset"]) ** 2 +
+        (df2["Result Y Offset"] - df2["Target Y Offset"]) ** 2
     )
     avg_dist = df2["Distance"].mean()
-    fig2 = px.histogram(df2, x="Distance", nbins=30,
-                        color_discrete_sequence=[COLORS["secondary"]],
-                        labels={"Distance": "Distance from target (mm)"})
-    fig2.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                       yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                       height=300, margin=dict(t=10), bargap=0.1)
+
+    fig2 = px.histogram(
+        df2, x="Distance", nbins=30,
+        color_discrete_sequence=[COLORS["secondary"]],
+        labels={"Distance": "Distance from target (mm)"},
+    )
+    fig2.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+        height=300,
+        margin=dict(t=10),
+        bargap=0.1,
+    )
     st.plotly_chart(fig2, use_container_width=True)
     st.caption(f"Average distance from target centre: **{avg_dist:.1f} mm**")
 
@@ -381,7 +439,7 @@ def tab_rtw(df):
     col2.metric("Total RTW Throws", f"{len(rtw_df):,}")
     col3.metric("Sessions", f"{rtw_df['Session'].nunique()}")
 
-    st.subheader("Accuracy by Number (1–20)")
+    st.subheader("Accuracy by Number (1-20)")
     rtw_num = rtw_df[rtw_df["Target Segment"].apply(lambda x: str(x).isdigit())].copy()
     rtw_num["Target Segment"] = rtw_num["Target Segment"].astype(int)
     rtw_seg = (
@@ -392,17 +450,23 @@ def tab_rtw(df):
     )
     rtw_seg["Accuracy"] = (rtw_seg["Hits"] / rtw_seg["Throws"] * 100).round(1)
 
-    fig = px.bar(rtw_seg, x="Target Segment", y="Accuracy",
-                 color="Accuracy",
-                 color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
-                 range_color=[0, 100], text="Accuracy",
-                 labels={"Target Segment": "Number", "Accuracy": "Hit Rate (%)"})
+    fig = px.bar(
+        rtw_seg, x="Target Segment", y="Accuracy",
+        color="Accuracy",
+        color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
+        range_color=[0, 100], text="Accuracy",
+        labels={"Target Segment": "Number", "Accuracy": "Hit Rate (%)"},
+    )
     fig.update_traces(texttemplate="%{text:.0f}%", textposition="outside")
-    fig.update_layout(coloraxis_showscale=False, paper_bgcolor="rgba(0,0,0,0)",
-                      plot_bgcolor="rgba(0,0,0,0)",
-                      yaxis=dict(range=[0, 115], gridcolor="rgba(255,255,255,0.05)"),
-                      xaxis=dict(tickmode="linear", tick0=1, dtick=1),
-                      height=400, margin=dict(t=10))
+    fig.update_layout(
+        coloraxis_showscale=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(range=[0, 115], gridcolor="rgba(255,255,255,0.05)"),
+        xaxis=dict(tickmode="linear", tick0=1, dtick=1),
+        height=400,
+        margin=dict(t=10),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     col1, col2 = st.columns(2)
@@ -414,16 +478,25 @@ def tab_rtw(df):
             .reset_index()
         )
         sess_rtw["Accuracy"] = (sess_rtw["Hits"] / sess_rtw["Throws"] * 100).round(1)
-        fig2 = px.line(sess_rtw, x="Session", y="Accuracy", markers=True,
-                       color_discrete_sequence=[COLORS["primary"]])
+
+        fig2 = px.line(
+            sess_rtw, x="Session", y="Accuracy", markers=True,
+            color_discrete_sequence=[COLORS["primary"]],
+        )
         if len(sess_rtw) >= 3:
             sess_rtw["Rolling"] = sess_rtw["Accuracy"].rolling(3, min_periods=1).mean().round(1)
-            fig2.add_scatter(x=sess_rtw["Session"], y=sess_rtw["Rolling"],
-                             mode="lines", name="3-session avg",
-                             line=dict(dash="dash", color=COLORS["secondary"], width=2))
-        fig2.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           yaxis=dict(range=[0, 105], gridcolor="rgba(255,255,255,0.05)"),
-                           height=320, margin=dict(t=10))
+            fig2.add_scatter(
+                x=sess_rtw["Session"], y=sess_rtw["Rolling"],
+                mode="lines", name="3-session avg",
+                line=dict(dash="dash", color=COLORS["secondary"], width=2),
+            )
+        fig2.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(range=[0, 105], gridcolor="rgba(255,255,255,0.05)"),
+            height=320,
+            margin=dict(t=10),
+        )
         st.plotly_chart(fig2, use_container_width=True)
 
     with col2:
@@ -432,13 +505,19 @@ def tab_rtw(df):
         if not misses_df.empty:
             miss_counts = misses_df["Target Segment"].value_counts().reset_index()
             miss_counts.columns = ["Segment", "Misses"]
-            fig3 = px.bar(miss_counts.head(10), x="Segment", y="Misses",
-                          color_discrete_sequence=[COLORS["miss"]],
-                          labels={"Segment": "Target Segment", "Misses": "Total Misses"})
-            fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                               xaxis=dict(type="category"),
-                               yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                               height=320, margin=dict(t=10))
+            fig3 = px.bar(
+                miss_counts.head(10), x="Segment", y="Misses",
+                color_discrete_sequence=[COLORS["miss"]],
+                labels={"Segment": "Target Segment", "Misses": "Total Misses"},
+            )
+            fig3.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(type="category"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                height=320,
+                margin=dict(t=10),
+            )
             st.plotly_chart(fig3, use_container_width=True)
         else:
             st.success("No misses recorded! 🎯")
@@ -463,20 +542,30 @@ def tab_players(df):
     player_stats["Avg Score"] = player_stats["Avg_Score"].round(2)
 
     st.dataframe(
-        player_stats[["Name", "Throws", "Hits", "Misses", "Accuracy (%)", "Avg Score", "Doubles", "Triples", "Sessions"]],
-        use_container_width=True, hide_index=True,
+        player_stats[[
+            "Name", "Throws", "Hits", "Misses",
+            "Accuracy (%)", "Avg Score", "Doubles", "Triples", "Sessions"
+        ]],
+        use_container_width=True,
+        hide_index=True,
     )
 
-    players = df["Name"].dropna().unique()
-    if len(players) >= 2:
-        fig = px.bar(player_stats, x="Name", y="Accuracy (%)", color="Name",
-                     color_discrete_sequence=px.colors.qualitative.Set2,
-                     text="Accuracy (%)")
+    if len(df["Name"].dropna().unique()) >= 2:
+        fig = px.bar(
+            player_stats, x="Name", y="Accuracy (%)",
+            color="Name",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+            text="Accuracy (%)",
+        )
         fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                          showlegend=False,
-                          yaxis=dict(range=[0, 110], gridcolor="rgba(255,255,255,0.05)"),
-                          height=350, margin=dict(t=10))
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+            yaxis=dict(range=[0, 110], gridcolor="rgba(255,255,255,0.05)"),
+            height=350,
+            margin=dict(t=10),
+        )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Add more players to see a comparison chart.")
@@ -500,27 +589,69 @@ def tab_sessions(df):
     sess_stats = sess_stats.sort_values("Session", ascending=False)
 
     st.dataframe(
-        sess_stats[["Session", "Name", "Date", "Throws", "Hits", "Misses", "Accuracy (%)", "Avg Score", "Modes"]],
-        use_container_width=True, hide_index=True,
+        sess_stats[[
+            "Session", "Name", "Date", "Throws", "Hits",
+            "Misses", "Accuracy (%)", "Avg Score", "Modes"
+        ]],
+        use_container_width=True,
+        hide_index=True,
     )
 
     st.subheader("Throws per Session")
-    fig = px.bar(sess_stats.sort_values("Session"), x="Session", y="Throws", color="Name",
-                 color_discrete_sequence=px.colors.qualitative.Set2,
-                 labels={"Session": "Session #", "Throws": "Total Throws"})
-    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                      xaxis=dict(tickmode="linear"), height=350, margin=dict(t=10))
+    fig = px.bar(
+        sess_stats.sort_values("Session"), x="Session", y="Throws",
+        color="Name",
+        color_discrete_sequence=px.colors.qualitative.Set2,
+        labels={"Session": "Session #", "Throws": "Total Throws"},
+    )
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+        xaxis=dict(tickmode="linear"),
+        height=350,
+        margin=dict(t=10),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
 def tab_raw(df):
     st.subheader(f"Raw Data — {len(df):,} rows")
-    st.dataframe(df.drop(columns=["Date"], errors="ignore"),
-                 use_container_width=True, hide_index=True)
+    st.dataframe(
+        df.drop(columns=["Date"], errors="ignore"),
+        use_container_width=True,
+        hide_index=True,
+    )
     csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download filtered CSV", csv,
-                       "dart_throws_filtered.csv", "text/csv")
+    st.download_button(
+        "Download filtered CSV", csv,
+        "dart_throws_filtered.csv", "text/csv",
+    )
+
+
+def show_troubleshooting():
+    lines = [
+        "**Most common issues:**",
+        "",
+        "**1. Private key formatting** — In Streamlit secrets the key must use triple quotes with real newlines:",
+        "```",
+        'private_key = """-----BEGIN RSA PRIVATE KEY-----',
+        "MIIEo...",
+        "-----END RSA PRIVATE KEY-----",
+        '"""',
+        "```",
+        "Do NOT use escaped \\\\n sequences.",
+        "",
+        "**2. File not shared** — Right-click the CSV in Drive, Share, then add the service account email as Viewer.",
+        "",
+        "**3. Wrong file_id** — Copy just the ID segment from the Drive URL:",
+        "`drive.google.com/file/d/THIS_PART/view`",
+        "",
+        "**4. Drive API not enabled** — Google Cloud Console, APIs and Services, Enable Google Drive API.",
+        "",
+        "**5. Wrong project_id** — Must match the project where the service account was created.",
+    ]
+    st.markdown("\n".join(lines))
 
 
 def main():
@@ -528,31 +659,11 @@ def main():
         df, errors = load_data_from_drive()
 
     if errors:
-        st.error("### ⚠️ Could not load data")
+        st.error("Could not load data")
         for err in errors:
             st.error(err)
-        with st.expander("🔧 Troubleshooting checklist"):
-            st.markdown("""
-**Most common issues:**
-
-1. **Private key formatting** — In Streamlit secrets, the key must use triple quotes with real newlines:
-```
-private_key = """-----BEGIN RSA PRIVATE KEY-----
-MIIEo...
------END RSA PRIVATE KEY-----
-"""
-```
-Do NOT use `\\n` escape sequences.
-
-2. **File not shared** — Right-click the CSV in Drive → Share → add the service account email as Viewer.
-
-3. **Wrong file_id** — Copy just the ID from the Drive URL:
-`drive.google.com/file/d/`**`THIS_PART`**`/view`
-
-4. **Drive API not enabled** — Google Cloud Console → APIs & Services → Enable "Google Drive API".
-
-5. **Wrong project_id** — Must match the project where the service account lives.
-            """)
+        with st.expander("Troubleshooting checklist"):
+            show_troubleshooting()
         st.stop()
 
     if df is None or df.empty:
@@ -572,16 +683,28 @@ Do NOT use `\\n` escape sequences.
     st.markdown("---")
 
     tabs = st.tabs([
-        "📊 Overview", "🎯 Accuracy", "📍 Positions",
-        "🔄 RTW", "👥 Players", "📅 Sessions", "🗃️ Raw Data"
+        "📊 Overview",
+        "🎯 Accuracy",
+        "📍 Positions",
+        "🔄 RTW",
+        "👥 Players",
+        "📅 Sessions",
+        "🗃️ Raw Data",
     ])
-    with tabs[0]: tab_overview(filtered)
-    with tabs[1]: tab_accuracy(filtered)
-    with tabs[2]: tab_scatter(filtered)
-    with tabs[3]: tab_rtw(filtered)
-    with tabs[4]: tab_players(filtered)
-    with tabs[5]: tab_sessions(filtered)
-    with tabs[6]: tab_raw(filtered)
+    with tabs[0]:
+        tab_overview(filtered)
+    with tabs[1]:
+        tab_accuracy(filtered)
+    with tabs[2]:
+        tab_scatter(filtered)
+    with tabs[3]:
+        tab_rtw(filtered)
+    with tabs[4]:
+        tab_players(filtered)
+    with tabs[5]:
+        tab_sessions(filtered)
+    with tabs[6]:
+        tab_raw(filtered)
 
 
 if __name__ == "__main__":
