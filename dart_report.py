@@ -105,7 +105,7 @@ def load_data_from_drive():
         return None, [f"CSV is missing columns: {missing}. Found: {list(df.columns)}"]
 
     try:
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], format="mixed", dayfirst=True)
         df["Session"] = df["Session"].astype(int)
         for col in ["Target X Offset", "Target Y Offset", "Result X Offset", "Result Y Offset"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
