@@ -40,7 +40,8 @@ COLORS = {
     "miss": "#e74c3c",
     "primary": "#01696f",
     "secondary": "#4f98a3",
-    "target": "rgba(255,255,255,0.60)",
+    "target": "rgba(255,255,255,0.65)",
+    "target_line": "rgba(255,255,255,0.35)",
     "board": "rgba(255,255,255,0.22)",
     "board_bold": "rgba(255,255,255,0.35)",
 }
@@ -80,10 +81,12 @@ def score_throw(result_segment, result_modifier):
         return 0
 
 
+
 def is_hit(target_seg, result_seg, result_mod):
     if str(result_mod).strip() == "M":
         return False
     return str(target_seg).strip() == str(result_seg).strip()
+
 
 
 def segment_sort_key(v):
@@ -94,12 +97,14 @@ def segment_sort_key(v):
     return (1, special_order.get(s, 999), s)
 
 
+
 def polar_to_cartesian(radius_pct, angle_deg):
     radius = pd.to_numeric(radius_pct, errors="coerce")
     angle = np.deg2rad(pd.to_numeric(angle_deg, errors="coerce"))
     x = radius * np.sin(angle)
     y = radius * np.cos(angle)
     return x, y
+
 
 
 def prepare_sheet_dataframe(values):
@@ -113,8 +118,7 @@ def prepare_sheet_dataframe(values):
         padded = list(row[:row_len]) + [""] * max(0, row_len - len(row))
         rows.append(padded[:row_len])
 
-    df = pd.DataFrame(rows, columns=headers)
-    return df
+    return pd.DataFrame(rows, columns=headers)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -193,6 +197,7 @@ def load_data_from_sheet():
     return df, []
 
 
+
 def render_sidebar(df):
     st.sidebar.markdown("## 🎯 Dart Tracker")
     st.sidebar.markdown("---")
@@ -238,6 +243,7 @@ def render_sidebar(df):
     return selected_players, selected_modes, selected_sessions, date_range
 
 
+
 def apply_filters(df, players, modes, sessions, date_range):
     f = df.copy()
     if players:
@@ -255,6 +261,7 @@ def apply_filters(df, players, modes, sessions, date_range):
     return f
 
 
+
 def render_kpis(df):
     total = len(df)
     hits = int(df["Hit"].sum())
@@ -262,7 +269,6 @@ def render_kpis(df):
     acc = (hits / total * 100) if total > 0 else 0
     avg_sc = df["Score"].mean() if total > 0 else 0
     doubles = int((df["Result Modifier"] == "D").sum())
-    triples = int((df["Result Modifier"] == "T").sum())
     avg_dist = df["Distance from Target mm"].dropna().mean() if total > 0 else np.nan
 
     cols = st.columns(7)
@@ -279,6 +285,7 @@ def render_kpis(df):
         ],
     ):
         col.metric(label, value)
+
 
 
 def tab_overview(df):
@@ -349,6 +356,7 @@ def tab_overview(df):
             bargap=0.1,
         )
         st.plotly_chart(fig3, use_container_width=True)
+
 
 
 def tab_accuracy(df):
@@ -452,6 +460,208 @@ def tab_accuracy(df):
         st.info(f"Heatmap requires data across multiple sessions. ({e})")
 
 
+
+def build_points_segment_stats(points_df):
+    stats = (
+        points_df.groupby("Target Segment")
+        .agg(
+            Throws=("Score", "count"),
+            Total_Points=("Score", "sum"),
+            Avg_Points=("Score", "mean"),
+            Hits=("Hit", "sum"),
+            Misses=("Result Modifier", lambda x: (x == "M").sum()),
+            Doubles=("Result Modifier", lambda x: (x == "D").sum()),
+            Triples=("Result Modifier", lambda x: (x == "T").sum()),
+            Avg_Error_mm=("Distance from Target mm", "mean"),
+            Std_Error_mm=("Distance from Target mm", "std"),
+            Unique_Sessions=("Session", "nunique"),
+        )
+        .reset_index()
+    )
+    if stats.empty:
+        return stats
+
+    stats["Accuracy %"] = (stats["Hits"] / stats["Throws"] * 100).round(1)
+    stats["Miss %"] = (stats["Misses"] / stats["Throws"] * 100).round(1)
+    stats["Double %"] = (stats["Doubles"] / stats["Throws"] * 100).round(1)
+    stats["Triple %"] = (stats["Triples"] / stats["Throws"] * 100).round(1)
+    stats["Avg Points"] = stats["Avg_Points"].round(2)
+    stats["Avg Error (mm)"] = stats["Avg_Error_mm"].round(1)
+    stats["Error SD (mm)"] = stats["Std_Error_mm"].round(1)
+    stats["Points per Hit"] = (stats["Total_Points"] / stats["Hits"].replace(0, np.nan)).round(2)
+    stats["Efficiency Rank"] = stats["Avg_Points"].rank(ascending=False, method="min").astype(int)
+    return stats.sort_values(["Avg_Points", "Accuracy %"], ascending=[False, False])
+
+
+
+def tab_points(df):
+    points_df = df[df["Mode"].astype(str).str.lower() == "points"].copy()
+    if points_df.empty:
+        st.info("No Points mode data found with the current filters.")
+        return
+
+    st.subheader("Points Mode — Segment Efficiency")
+    stats = build_points_segment_stats(points_df)
+
+    best_avg = stats.iloc[0]
+    most_accurate = stats.sort_values(["Accuracy %", "Throws"], ascending=[False, False]).iloc[0]
+    best_double = stats.sort_values(["Double %", "Throws"], ascending=[False, False]).iloc[0]
+    best_triple = stats.sort_values(["Triple %", "Throws"], ascending=[False, False]).iloc[0]
+    safest = stats.sort_values(["Miss %", "Throws"], ascending=[True, False]).iloc[0]
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Best Avg Points", f"{best_avg['Target Segment']}", f"{best_avg['Avg Points']:.2f} pts/throw")
+    c2.metric("Best Accuracy", f"{most_accurate['Target Segment']}", f"{most_accurate['Accuracy %']:.1f}%")
+    c3.metric("Best Double Rate", f"{best_double['Target Segment']}", f"{best_double['Double %']:.1f}%")
+    c4.metric("Best Triple Rate", f"{best_triple['Target Segment']}", f"{best_triple['Triple %']:.1f}%")
+    c5.metric("Lowest Miss Rate", f"{safest['Target Segment']}", f"{safest['Miss %']:.1f}%")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Average Points per Throw")
+        top_avg = stats.sort_values(["Avg_Points", "Throws"], ascending=[False, False]).head(12)
+        fig = px.bar(
+            top_avg.sort_values("Avg_Points"),
+            x="Avg_Points",
+            y="Target Segment",
+            orientation="h",
+            text="Avg Points",
+            color="Accuracy %",
+            color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
+            labels={"Avg_Points": "Avg points per throw", "Target Segment": "Target segment"},
+        )
+        fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig.update_layout(
+            coloraxis_colorbar_title="Accuracy %",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=420,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        st.subheader("Accuracy vs Scoring Value")
+        bubble = stats.copy()
+        fig2 = px.scatter(
+            bubble,
+            x="Accuracy %",
+            y="Avg_Points",
+            size="Throws",
+            color="Miss %",
+            text="Target Segment",
+            color_continuous_scale="RdYlGn_r",
+            hover_data={
+                "Throws": True,
+                "Double %": ':.1f',
+                "Triple %": ':.1f',
+                "Avg Error (mm)": ':.1f',
+                "Miss %": ':.1f',
+            },
+            labels={"Avg_Points": "Avg points per throw", "Accuracy %": "Accuracy %"},
+        )
+        fig2.update_traces(textposition="top center")
+        fig2.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=420,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.subheader("Segment Detail")
+    st.dataframe(
+        stats[
+            [
+                "Efficiency Rank",
+                "Target Segment",
+                "Throws",
+                "Total_Points",
+                "Avg Points",
+                "Accuracy %",
+                "Double %",
+                "Triple %",
+                "Miss %",
+                "Points per Hit",
+                "Avg Error (mm)",
+                "Error SD (mm)",
+                "Unique_Sessions",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("Outcome Mix by Target Segment")
+    outcome = stats[["Target Segment", "Double %", "Triple %", "Miss %"]].copy()
+    outcome = outcome.sort_values("Target Segment", key=lambda s: s.map(segment_sort_key))
+    melted = outcome.melt(id_vars="Target Segment", var_name="Outcome", value_name="Rate")
+    fig3 = px.bar(
+        melted,
+        x="Target Segment",
+        y="Rate",
+        color="Outcome",
+        barmode="group",
+        color_discrete_map={
+            "Double %": "#3498db",
+            "Triple %": "#9b59b6",
+            "Miss %": COLORS["miss"],
+        },
+        labels={"Rate": "Rate %", "Target Segment": "Target segment"},
+    )
+    fig3.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+        height=380,
+        margin=dict(t=10),
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+
+    st.subheader("Points Sessions Trend")
+    sess = (
+        points_df.dropna(subset=["Session"])
+        .groupby("Session")
+        .agg(Throws=("Score", "count"), Total_Points=("Score", "sum"), Avg_Points=("Score", "mean"))
+        .reset_index()
+        .sort_values("Session")
+    )
+    fig4 = go.Figure()
+    fig4.add_trace(
+        go.Scatter(
+            x=sess["Session"],
+            y=sess["Avg_Points"],
+            mode="lines+markers",
+            name="Avg points/throw",
+            line=dict(color=COLORS["primary"], width=3),
+        )
+    )
+    fig4.add_trace(
+        go.Bar(
+            x=sess["Session"],
+            y=sess["Total_Points"],
+            name="Total points",
+            marker_color="rgba(79,152,163,0.45)",
+            yaxis="y2",
+        )
+    )
+    fig4.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(title="Session", gridcolor="rgba(255,255,255,0.05)"),
+        yaxis=dict(title="Avg points/throw", gridcolor="rgba(255,255,255,0.05)"),
+        yaxis2=dict(title="Total points", overlaying="y", side="right", showgrid=False),
+        barmode="overlay",
+        height=380,
+        margin=dict(t=10),
+    )
+    st.plotly_chart(fig4, use_container_width=True)
+
+
+
 def add_board_traces(fig):
     theta = np.linspace(0, 2 * np.pi, 721)
     ring_styles = [
@@ -509,6 +719,7 @@ def add_board_traces(fig):
     )
 
 
+
 def board_layout(fig, title=None):
     fig.update_layout(
         title=title,
@@ -534,6 +745,50 @@ def board_layout(fig, title=None):
     )
 
 
+
+def add_target_arrows(fig, arrow_df):
+    for _, row in arrow_df.iterrows():
+        fig.add_annotation(
+            x=row["Result X Pct"],
+            y=row["Result Y Pct"],
+            ax=row["Target X Pct"],
+            ay=row["Target Y Pct"],
+            xref="x",
+            yref="y",
+            axref="x",
+            ayref="y",
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowwidth=1.2,
+            arrowcolor=COLORS["target_line"],
+            opacity=0.65,
+        )
+
+
+
+def make_transparent_heatmap(plot_df, bins=48):
+    x = plot_df["Result X Pct"].to_numpy(dtype=float)
+    y = plot_df["Result Y Pct"].to_numpy(dtype=float)
+    x_edges = np.linspace(-1.15, 1.15, bins + 1)
+    y_edges = np.linspace(-1.15, 1.15, bins + 1)
+    hist, x_edges, y_edges = np.histogram2d(x, y, bins=[x_edges, y_edges])
+    z = hist.T
+    z[z == 0] = np.nan
+    x_centres = (x_edges[:-1] + x_edges[1:]) / 2
+    y_centres = (y_edges[:-1] + y_edges[1:]) / 2
+    return go.Heatmap(
+        x=x_centres,
+        y=y_centres,
+        z=z,
+        colorscale="YlOrRd",
+        colorbar=dict(title="Throws"),
+        hoverongaps=False,
+        hovertemplate="X %{x:.2f}<br>Y %{y:.2f}<br>Count %{z:.0f}<extra></extra>",
+    )
+
+
+
 def tab_positions(df):
     st.subheader("Throw Positions")
     st.caption(
@@ -541,13 +796,15 @@ def tab_positions(df):
     )
 
     target_options = sorted(df["Target Segment"].dropna().unique().tolist(), key=segment_sort_key)
-    controls = st.columns([1.1, 1.1, 1.1])
+    controls = st.columns([1.1, 1.1, 1.1, 1.2])
     with controls[0]:
         selected_seg = st.selectbox("Filter by Target Segment", ["All"] + [str(s) for s in target_options])
     with controls[1]:
         view_mode = st.radio("View", ["Individual throws", "Heatmap"], horizontal=True)
     with controls[2]:
-        show_targets = st.checkbox("Show target markers", value=True)
+        show_targets = st.checkbox("Show target markers + arrows", value=False)
+    with controls[3]:
+        max_arrows = st.slider("Max arrows", min_value=25, max_value=500, value=150, step=25)
 
     plot_df = df.dropna(subset=["Result X Pct", "Result Y Pct"]).copy()
     if selected_seg != "All":
@@ -562,8 +819,11 @@ def tab_positions(df):
         add_board_traces(fig)
 
         if show_targets:
-            targets_df = plot_df.dropna(subset=["Target X Pct", "Target Y Pct"])
+            targets_df = plot_df.dropna(subset=["Target X Pct", "Target Y Pct"]).copy()
             if not targets_df.empty:
+                if len(targets_df) > max_arrows:
+                    targets_df = targets_df.sort_values("Timestamp", na_position="last").tail(max_arrows)
+                add_target_arrows(fig, targets_df)
                 fig.add_trace(
                     go.Scattergl(
                         x=targets_df["Target X Pct"],
@@ -628,23 +888,15 @@ def tab_positions(df):
 
         board_layout(fig)
         st.plotly_chart(fig, use_container_width=True)
+        if show_targets and len(plot_df) > max_arrows:
+            st.caption(f"Showing arrows for the most recent {max_arrows} throws to keep the chart responsive.")
     else:
         fig = go.Figure()
-        fig.add_trace(
-            go.Histogram2d(
-                x=plot_df["Result X Pct"],
-                y=plot_df["Result Y Pct"],
-                nbinsx=48,
-                nbinsy=48,
-                colorscale="YlOrRd",
-                colorbar=dict(title="Throws"),
-                hovertemplate="X %{x:.2f}<br>Y %{y:.2f}<br>Count %{z}<extra></extra>",
-            )
-        )
+        fig.add_trace(make_transparent_heatmap(plot_df))
         add_board_traces(fig)
         board_layout(fig)
         st.plotly_chart(fig, use_container_width=True)
-        st.caption("The heatmap bins result positions on the normalised board, so hot zones show where darts cluster most often.")
+        st.caption("Zero-count bins are transparent so only areas with actual throws are coloured.")
 
     st.subheader("Distance from Target Centre (mm)")
     dist_df = plot_df.dropna(subset=["Distance from Target mm"])
@@ -667,6 +919,7 @@ def tab_positions(df):
     )
     st.plotly_chart(fig2, use_container_width=True)
     st.caption(f"Average distance from target centre: **{avg_dist:.1f} mm**" if pd.notna(avg_dist) else "Average distance from target centre: —")
+
 
 
 def tab_rtw(df):
@@ -778,6 +1031,7 @@ def tab_rtw(df):
             st.success("No misses recorded! 🎯")
 
 
+
 def tab_players(df):
     st.subheader("Player Comparison")
     player_stats = (
@@ -840,6 +1094,7 @@ def tab_players(df):
         st.info("Add more players to see a comparison chart.")
 
 
+
 def tab_sessions(df):
     st.subheader("Session Summary")
     sess_stats = (
@@ -898,11 +1153,13 @@ def tab_sessions(df):
     st.plotly_chart(fig, use_container_width=True)
 
 
+
 def tab_raw(df):
     st.subheader(f"Raw Data — {len(df):,} rows")
     st.dataframe(df.drop(columns=["Date"], errors="ignore"), use_container_width=True, hide_index=True)
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("Download filtered CSV", csv, "dart_throws_filtered.csv", "text/csv")
+
 
 
 def show_troubleshooting():
@@ -927,6 +1184,7 @@ def show_troubleshooting():
         f"**5. Wrong worksheet name** — This app expects a tab named `{WORKSHEET_NAME}`.",
     ]
     st.markdown("\n".join(lines))
+
 
 
 def main():
@@ -961,6 +1219,7 @@ def main():
         [
             "📊 Overview",
             "🎯 Accuracy",
+            "💯 Points",
             "📍 Positions",
             "🔄 RTW",
             "👥 Players",
@@ -973,14 +1232,16 @@ def main():
     with tabs[1]:
         tab_accuracy(filtered)
     with tabs[2]:
-        tab_positions(filtered)
+        tab_points(filtered)
     with tabs[3]:
-        tab_rtw(filtered)
+        tab_positions(filtered)
     with tabs[4]:
-        tab_players(filtered)
+        tab_rtw(filtered)
     with tabs[5]:
-        tab_sessions(filtered)
+        tab_players(filtered)
     with tabs[6]:
+        tab_sessions(filtered)
+    with tabs[7]:
         tab_raw(filtered)
 
 
