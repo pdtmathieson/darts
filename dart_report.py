@@ -724,6 +724,55 @@ def make_transparent_heatmap(plot_df, bins=48):
 
 
 
+
+def get_segment_centroid(seg, radius=0.78):
+    seg_num = _numeric_segment(seg)
+    if seg_num is None or seg_num not in DARTBOARD_ORDER:
+        return None, None
+    idx = DARTBOARD_ORDER.index(seg_num)
+    angle = np.deg2rad(idx * 18)
+    return radius * np.sin(angle), radius * np.cos(angle)
+
+
+def add_segment_percentage_overlay(fig, plot_df, selected_seg, overlay_hits=True):
+    if plot_df.empty or selected_seg == "All":
+        return
+    work = plot_df.copy()
+    work = work[work["Result Modifier"].astype(str) != "M"].copy()
+    if work.empty:
+        return
+    counts = work["Result Segment"].astype(str).value_counts()
+    total = counts.sum()
+    if total == 0:
+        return
+    labels = []
+    xs = []
+    ys = []
+    for seg, count in counts.items():
+        x, y = get_segment_centroid(seg)
+        if x is None or y is None:
+            continue
+        pct = count / total * 100
+        labels.append(f"{pct:.0f}%")
+        xs.append(x)
+        ys.append(y)
+    if not xs:
+        return
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=ys,
+            mode="text",
+            text=labels,
+            textfont=dict(size=14, color="white"),
+            textposition="middle center",
+            name="Segment %",
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+
 def build_segment_hit_distribution(plot_df, selected_seg):
     if plot_df.empty or selected_seg == "All":
         return pd.DataFrame()
@@ -834,7 +883,8 @@ def tab_positions(df):
         if not miss_subset.empty:
             miss_subset["Color"] = miss_subset["Board Segment Distance"].apply(get_distance_color)
             fig.add_trace(go.Scattergl(x=miss_subset["Result X Pct"], y=miss_subset["Result Y Pct"], mode="markers", name="Miss", marker=dict(size=9, color=miss_subset["Color"], opacity=0.82, line=dict(width=0)), customdata=np.stack([miss_subset["Name"].astype(str), miss_subset["Target Segment"].astype(str), miss_subset["Result Segment"].astype(str), miss_subset["Result Modifier"].astype(str), miss_subset["Adjacent Miss Type"].astype(str), miss_subset["Board DistanceBucket" if False else "Board Distance Bucket"].astype(str), miss_subset["Board Segment Distance"].fillna(-1), miss_subset["Result Radius Pct"].round(3), miss_subset["Result Angle"].round(1), miss_subset["Score"], miss_subset["Session"].astype(str)], axis=-1), hovertemplate=("%{customdata[0]}<br>Target: %{customdata[1]}<br>Result: %{customdata[2]} (%{customdata[3]})<br>Miss class: %{customdata[4]}<br>Distance bucket: %{customdata[5]}<br>Board distance: %{customdata[6]}<br>Radius: %{customdata[7]}<br>Angle: %{customdata[8]}°<br>Score: %{customdata[9]}<br>Session: %{customdata[10]}<extra></extra>")))
-        board_layout(fig)
+        add_segment_percentage_overlay(fig, plot_df, selected_seg)
+        board_layout(fig, title="Throws with board segment overlay")
         st.plotly_chart(fig, use_container_width=True, key="positions_individual_throws")
         if show_targets and len(plot_df) > max_arrows:
             st.caption(f"Showing arrows for the most recent {max_arrows} throws to keep the chart responsive. Misses are shaded by board-segment distance from the intended number: 1 away is darkest, then lighter as the miss gets further away.")
@@ -842,11 +892,10 @@ def tab_positions(df):
         fig = go.Figure()
         fig.add_trace(make_transparent_heatmap(plot_df))
         add_board_traces(fig)
-        board_layout(fig, title="Heatmap with board overlay")
+        add_segment_percentage_overlay(fig, plot_df, selected_seg)
+        board_layout(fig, title="Heatmap with board segment overlay")
         st.plotly_chart(fig, use_container_width=True, key="positions_heatmap")
-        st.caption("Zero-count bins are transparent so only areas with actual throws are coloured, with the board frame drawn over the heatmap so the segment boundaries remain visible.")
-
-    render_selected_segment_breakdown(plot_df, selected_seg, section_key="positions")
+        st.caption("Zero-count bins are transparent so only areas with actual throws are coloured, with the board segment frame drawn over the plot. When a single target is selected, result-segment percentages are overlaid directly on the board.")
 
     miss_map = plot_df[(~plot_df["Hit"]) & plot_df["Board Segment Distance"].notna()].copy()
     if not miss_map.empty:
