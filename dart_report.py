@@ -888,7 +888,6 @@ def tab_positions(df):
 
     if view_mode == "Individual throws":
         fig = go.Figure()
-        add_board_traces(fig)
 
         if show_targets:
             targets_df = plot_df.dropna(subset=["Target X Pct", "Target Y Pct"]).copy()
@@ -999,6 +998,7 @@ def tab_positions(df):
                 )
             )
 
+        add_board_traces(fig)
         add_segment_percentage_overlay(fig, plot_df, selected_seg)
         board_layout(fig, title="Throws with board segment overlay")
         st.plotly_chart(fig, use_container_width=True, key="positions_individual_throws")
