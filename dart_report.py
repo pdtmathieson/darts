@@ -753,18 +753,31 @@ def add_segment_percentage_overlay(fig, plot_df, selected_seg, overlay_hits=True
         if x is None or y is None:
             continue
         pct = count / total * 100
-        labels.append(f"{pct:.0f}%")
+        labels.append(f"{pct:.2f}%")
         xs.append(x)
         ys.append(y)
     if not xs:
         return
+    for dx, dy in [(-0.008, -0.008), (0.008, -0.008), (-0.008, 0.008), (0.008, 0.008)]:
+        fig.add_trace(
+            go.Scatter(
+                x=[x + dx for x in xs],
+                y=[y + dy for y in ys],
+                mode="text",
+                text=labels,
+                textfont=dict(size=15, color="rgba(0,0,0,0.88)"),
+                textposition="middle center",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
     fig.add_trace(
         go.Scatter(
             x=xs,
             y=ys,
             mode="text",
             text=labels,
-            textfont=dict(size=14, color="white"),
+            textfont=dict(size=13, color="white"),
             textposition="middle center",
             name="Segment %",
             showlegend=False,
@@ -849,8 +862,12 @@ def render_selected_segment_breakdown(plot_df, selected_seg, section_key="positi
 
 def tab_positions(df):
     st.subheader("Throw Positions")
-    st.caption("This view uses the radius/angle fields. 0° is straight up, 90° is right, and 1.0 is the outer board edge. Values above 1.0 are outside the board.")
+    st.caption(
+        "This view uses the radius/angle fields. 0° is straight up, 90° is right, and 1.0 is the outer board edge. Values above 1.0 are outside the board."
+    )
+
     target_options = sorted(df["Target Segment"].dropna().unique().tolist(), key=segment_sort_key)
+
     controls = st.columns([1.1, 1.1, 1.1, 1.2])
     with controls[0]:
         selected_seg = st.selectbox("Filter by Target Segment", ["All"] + [str(s) for s in target_options], key="positions_target_segment")
@@ -860,34 +877,136 @@ def tab_positions(df):
         show_targets = st.checkbox("Show target markers + arrows", value=False, key="positions_show_targets")
     with controls[3]:
         max_arrows = st.slider("Max arrows", min_value=25, max_value=500, value=150, step=25, key="positions_max_arrows")
+
     plot_df = df.dropna(subset=["Result X Pct", "Result Y Pct"]).copy()
     if selected_seg != "All":
         plot_df = plot_df[plot_df["Target Segment"].astype(str) == selected_seg]
+
     if plot_df.empty:
         st.warning("No plottable position data for the current filters.")
         return
+
     if view_mode == "Individual throws":
         fig = go.Figure()
         add_board_traces(fig)
+
         if show_targets:
             targets_df = plot_df.dropna(subset=["Target X Pct", "Target Y Pct"]).copy()
             if not targets_df.empty:
                 if len(targets_df) > max_arrows:
                     targets_df = targets_df.sort_values("Timestamp", na_position="last").tail(max_arrows)
                 add_target_arrows(fig, targets_df)
-                fig.add_trace(go.Scattergl(x=targets_df["Target X Pct"], y=targets_df["Target Y Pct"], mode="markers", name="Targets", marker=dict(symbol="x", size=9, color=COLORS["target"], line=dict(width=1)), customdata=np.stack([targets_df["Target Segment"].astype(str), targets_df["Target Modifier"].astype(str), targets_df["Target Radius Pct"].round(3), targets_df["Target Angle"].round(1)], axis=-1), hovertemplate=("Target %{customdata[0]} (%{customdata[1]})<br>Radius %{customdata[2]}<br>Angle %{customdata[3]}°<extra></extra>")))
+                fig.add_trace(
+                    go.Scattergl(
+                        x=targets_df["Target X Pct"],
+                        y=targets_df["Target Y Pct"],
+                        mode="markers",
+                        name="Targets",
+                        marker=dict(symbol="x", size=9, color=COLORS["target"], line=dict(width=1)),
+                        customdata=np.stack(
+                            [
+                                targets_df["Target Segment"].astype(str),
+                                targets_df["Target Modifier"].astype(str),
+                                targets_df["Target Radius Pct"].round(3),
+                                targets_df["Target Angle"].round(1),
+                            ],
+                            axis=-1,
+                        ),
+                        hovertemplate=(
+                            "Target %{customdata[0]} (%{customdata[1]})<br>"
+                            "Radius %{customdata[2]}<br>"
+                            "Angle %{customdata[3]}°<extra></extra>"
+                        ),
+                    )
+                )
+
         hit_subset = plot_df[plot_df["Hit"]]
         if not hit_subset.empty:
-            fig.add_trace(go.Scattergl(x=hit_subset["Result X Pct"], y=hit_subset["Result Y Pct"], mode="markers", name="Hit", marker=dict(size=9, color=COLORS["hit"], opacity=0.72, line=dict(width=0)), customdata=np.stack([hit_subset["Name"].astype(str), hit_subset["Target Segment"].astype(str), hit_subset["Result Segment"].astype(str), hit_subset["Result Modifier"].astype(str), hit_subset["Adjacent Miss Type"].astype(str), hit_subset["Board Distance Bucket"].astype(str), hit_subset["Result Radius Pct"].round(3), hit_subset["Result Angle"].round(1), hit_subset["Score"], hit_subset["Session"].astype(str)], axis=-1), hovertemplate=("%{customdata[0]}<br>Target: %{customdata[1]}<br>Result: %{customdata[2]} (%{customdata[3]})<br>Miss class: %{customdata[4]}<br>Distance bucket: %{customdata[5]}<br>Radius: %{customdata[6]}<br>Angle: %{customdata[7]}°<br>Score: %{customdata[8]}<br>Session: %{customdata[9]}<extra></extra>")))
+            fig.add_trace(
+                go.Scattergl(
+                    x=hit_subset["Result X Pct"],
+                    y=hit_subset["Result Y Pct"],
+                    mode="markers",
+                    name="Hit",
+                    marker=dict(size=9, color=COLORS["hit"], opacity=0.72, line=dict(width=0)),
+                    customdata=np.stack(
+                        [
+                            hit_subset["Name"].astype(str),
+                            hit_subset["Target Segment"].astype(str),
+                            hit_subset["Result Segment"].astype(str),
+                            hit_subset["Result Modifier"].astype(str),
+                            hit_subset["Adjacent Miss Type"].astype(str),
+                            hit_subset["Board Distance Bucket"].astype(str),
+                            hit_subset["Result Radius Pct"].round(3),
+                            hit_subset["Result Angle"].round(1),
+                            hit_subset["Score"],
+                            hit_subset["Session"].astype(str),
+                        ],
+                        axis=-1,
+                    ),
+                    hovertemplate=(
+                        "%{customdata[0]}<br>"
+                        "Target: %{customdata[1]}<br>"
+                        "Result: %{customdata[2]} (%{customdata[3]})<br>"
+                        "Miss class: %{customdata[4]}<br>"
+                        "Distance bucket: %{customdata[5]}<br>"
+                        "Radius: %{customdata[6]}<br>"
+                        "Angle: %{customdata[7]}°<br>"
+                        "Score: %{customdata[8]}<br>"
+                        "Session: %{customdata[9]}<extra></extra>"
+                    ),
+                )
+            )
+
         miss_subset = plot_df[~plot_df["Hit"]].copy()
         if not miss_subset.empty:
             miss_subset["Color"] = miss_subset["Board Segment Distance"].apply(get_distance_color)
-            fig.add_trace(go.Scattergl(x=miss_subset["Result X Pct"], y=miss_subset["Result Y Pct"], mode="markers", name="Miss", marker=dict(size=9, color=miss_subset["Color"], opacity=0.82, line=dict(width=0)), customdata=np.stack([miss_subset["Name"].astype(str), miss_subset["Target Segment"].astype(str), miss_subset["Result Segment"].astype(str), miss_subset["Result Modifier"].astype(str), miss_subset["Adjacent Miss Type"].astype(str), miss_subset["Board DistanceBucket" if False else "Board Distance Bucket"].astype(str), miss_subset["Board Segment Distance"].fillna(-1), miss_subset["Result Radius Pct"].round(3), miss_subset["Result Angle"].round(1), miss_subset["Score"], miss_subset["Session"].astype(str)], axis=-1), hovertemplate=("%{customdata[0]}<br>Target: %{customdata[1]}<br>Result: %{customdata[2]} (%{customdata[3]})<br>Miss class: %{customdata[4]}<br>Distance bucket: %{customdata[5]}<br>Board distance: %{customdata[6]}<br>Radius: %{customdata[7]}<br>Angle: %{customdata[8]}°<br>Score: %{customdata[9]}<br>Session: %{customdata[10]}<extra></extra>")))
+            fig.add_trace(
+                go.Scattergl(
+                    x=miss_subset["Result X Pct"],
+                    y=miss_subset["Result Y Pct"],
+                    mode="markers",
+                    name="Miss",
+                    marker=dict(size=9, color=miss_subset["Color"], opacity=0.82, line=dict(width=0)),
+                    customdata=np.stack(
+                        [
+                            miss_subset["Name"].astype(str),
+                            miss_subset["Target Segment"].astype(str),
+                            miss_subset["Result Segment"].astype(str),
+                            miss_subset["Result Modifier"].astype(str),
+                            miss_subset["Adjacent Miss Type"].astype(str),
+                            miss_subset["Board Distance Bucket"].astype(str),
+                            miss_subset["Board Segment Distance"].fillna(-1),
+                            miss_subset["Result Radius Pct"].round(3),
+                            miss_subset["Result Angle"].round(1),
+                            miss_subset["Score"],
+                            miss_subset["Session"].astype(str),
+                        ],
+                        axis=-1,
+                    ),
+                    hovertemplate=(
+                        "%{customdata[0]}<br>"
+                        "Target: %{customdata[1]}<br>"
+                        "Result: %{customdata[2]} (%{customdata[3]})<br>"
+                        "Miss class: %{customdata[4]}<br>"
+                        "Distance bucket: %{customdata[5]}<br>"
+                        "Board distance: %{customdata[6]}<br>"
+                        "Radius: %{customdata[7]}<br>"
+                        "Angle: %{customdata[8]}°<br>"
+                        "Score: %{customdata[9]}<br>"
+                        "Session: %{customdata[10]}<extra></extra>"
+                    ),
+                )
+            )
+
         add_segment_percentage_overlay(fig, plot_df, selected_seg)
         board_layout(fig, title="Throws with board segment overlay")
         st.plotly_chart(fig, use_container_width=True, key="positions_individual_throws")
         if show_targets and len(plot_df) > max_arrows:
-            st.caption(f"Showing arrows for the most recent {max_arrows} throws to keep the chart responsive. Misses are shaded by board-segment distance from the intended number: 1 away is darkest, then lighter as the miss gets further away.")
+            st.caption(
+                f"Showing arrows for the most recent {max_arrows} throws to keep the chart responsive. Misses are shaded by board-segment distance from the intended number: 1 away is darkest, then lighter as the miss gets further away."
+            )
+
     else:
         fig = go.Figure()
         fig.add_trace(make_transparent_heatmap(plot_df))
@@ -895,26 +1014,61 @@ def tab_positions(df):
         add_segment_percentage_overlay(fig, plot_df, selected_seg)
         board_layout(fig, title="Heatmap with board segment overlay")
         st.plotly_chart(fig, use_container_width=True, key="positions_heatmap")
-        st.caption("Zero-count bins are transparent so only areas with actual throws are coloured, with the board segment frame drawn over the plot. When a single target is selected, result-segment percentages are overlaid directly on the board.")
+        st.caption(
+            "Zero-count bins are transparent so only areas with actual throws are coloured, with the board segment frame drawn over the plot. When a single target is selected, result-segment percentages are overlaid directly on the board."
+        )
 
     miss_map = plot_df[(~plot_df["Hit"]) & plot_df["Board Segment Distance"].notna()].copy()
     if not miss_map.empty:
         st.subheader("Miss Distance by Intended Segment")
         miss_summary = miss_map.groupby(["Target Segment", "Board Distance Bucket"]).size().reset_index(name="Count")
-        fig3 = px.bar(miss_summary, x="Target Segment", y="Count", color="Board Distance Bucket", barmode="stack", color_discrete_map={"1 away": COLORS["distance_1"], "2 away": COLORS["distance_2"], "3 away": COLORS["distance_3"], "4 away": COLORS["distance_4"], "5+ away": COLORS["distance_other"]})
-        fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis=dict(gridcolor="rgba(255,255,255,0.05)"), height=320, margin=dict(t=10))
+        fig3 = px.bar(
+            miss_summary,
+            x="Target Segment",
+            y="Count",
+            color="Board Distance Bucket",
+            barmode="stack",
+            color_discrete_map={
+                "1 away": COLORS["distance_1"],
+                "2 away": COLORS["distance_2"],
+                "3 away": COLORS["distance_3"],
+                "4 away": COLORS["distance_4"],
+                "5+ away": COLORS["distance_other"],
+            },
+        )
+        fig3.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=320,
+            margin=dict(t=10),
+        )
         st.plotly_chart(fig3, use_container_width=True, key="positions_miss_distance_stack")
+
     st.subheader("Distance from Target Centre (mm)")
     dist_df = plot_df.dropna(subset=["Distance from Target mm"])
     avg_dist = dist_df["Distance from Target mm"].mean() if not dist_df.empty else np.nan
     if dist_df.empty:
         st.info("No distance data available.")
     else:
-        fig2 = px.histogram(dist_df, x="Distance from Target mm", nbins=30, color_discrete_sequence=[COLORS["secondary"]], labels={"Distance from Target mm": "Distance from target (mm)"})
-        fig2.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis=dict(gridcolor="rgba(255,255,255,0.05)"), height=300, margin=dict(t=10), bargap=0.1)
+        fig2 = px.histogram(
+            dist_df,
+            x="Distance from Target mm",
+            nbins=30,
+            color_discrete_sequence=[COLORS["secondary"]],
+            labels={"Distance from Target mm": "Distance from target (mm)"},
+        )
+        fig2.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=300,
+            margin=dict(t=10),
+            bargap=0.1,
+        )
         st.plotly_chart(fig2, use_container_width=True, key="positions_distance_hist")
-    st.caption(f"Average distance from target centre: **{avg_dist:.1f} mm**" if pd.notna(avg_dist) else "Average distance from target centre: —")
 
+    st.caption(f"Average distance from target centre: **{avg_dist:.1f} mm**" if pd.notna(avg_dist) else "Average distance from target centre: —")
 
 def build_consecutive_hit_streaks(source_df):
     if source_df.empty:
