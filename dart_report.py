@@ -723,6 +723,81 @@ def make_transparent_heatmap(plot_df, bins=48):
     return go.Heatmap(x=x_centres, y=y_centres, z=z, colorscale="YlOrRd", colorbar=dict(title="Throws"), hoverongaps=False, hovertemplate="X %{x:.2f}<br>Y %{y:.2f}<br>Count %{z:.0f}<extra></extra>")
 
 
+
+def build_segment_hit_distribution(plot_df, selected_seg):
+    if plot_df.empty or selected_seg == "All":
+        return pd.DataFrame()
+    work = plot_df.copy()
+    work["Result Label"] = np.where(
+        work["Result Modifier"].astype(str).eq("M"),
+        "Board Miss",
+        work["Result Segment"].astype(str)
+    )
+    dist = work.groupby("Result Label").size().reset_index(name="Count")
+    total = dist["Count"].sum()
+    dist["Pct"] = (dist["Count"] / total * 100).round(1) if total else 0
+
+    def _sort_label(v):
+        if v == str(selected_seg):
+            return (-1, -1, v)
+        if v == "Board Miss":
+            return (99, 99, v)
+        num = _numeric_segment(v)
+        if num is not None and _numeric_segment(selected_seg) is not None:
+            bd = get_board_distance(selected_seg, v)
+            return (0 if pd.notna(bd) else 1, int(bd) if pd.notna(bd) else 999, num)
+        return (2, 999, str(v))
+
+    dist = dist.sort_values("Result Label", key=lambda s: s.map(_sort_label)).reset_index(drop=True)
+    return dist
+
+
+def render_selected_segment_breakdown(plot_df, selected_seg, section_key="positions"):
+    if selected_seg == "All":
+        st.info("Select a single target segment to see where misses land by board segment percentage.")
+        return
+    dist = build_segment_hit_distribution(plot_df, selected_seg)
+    if dist.empty:
+        st.info("No result-segment distribution available for the selected target.")
+        return
+
+    st.subheader(f"Result Segment Breakdown for Target {selected_seg}")
+    top_row = st.columns(4)
+    total = int(dist["Count"].sum())
+    exact = dist.loc[dist["Result Label"].astype(str) == str(selected_seg), "Pct"]
+    board_miss = dist.loc[dist["Result Label"] == "Board Miss", "Pct"]
+    top_miss = dist[dist["Result Label"].astype(str) != str(selected_seg)].head(1)
+    top_row[0].metric("Throws", f"{total:,}")
+    top_row[1].metric("Exact Segment %", f"{float(exact.iloc[0]) if not exact.empty else 0:.1f}%")
+    top_row[2].metric("Board Miss %", f"{float(board_miss.iloc[0]) if not board_miss.empty else 0:.1f}%")
+    if not top_miss.empty:
+        top_row[3].metric("Top Miss Segment", str(top_miss.iloc[0]["Result Label"]), f"{float(top_miss.iloc[0]['Pct']):.1f}%")
+    else:
+        top_row[3].metric("Top Miss Segment", "—")
+
+    fig = px.bar(
+        dist.head(15).sort_values("Pct"),
+        x="Pct",
+        y="Result Label",
+        orientation="h",
+        text="Pct",
+        color="Result Label",
+        color_discrete_sequence=px.colors.qualitative.Bold,
+    )
+    fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(title="Share of throws (%)", gridcolor="rgba(255,255,255,0.05)"),
+        yaxis=dict(title="Landed segment", type="category"),
+        showlegend=False,
+        height=420,
+        margin=dict(t=10),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"{section_key}_segment_breakdown_chart")
+    st.dataframe(dist, use_container_width=True, hide_index=True)
+
+
 def tab_positions(df):
     st.subheader("Throw Positions")
     st.caption("This view uses the radius/angle fields. 0° is straight up, 90° is right, and 1.0 is the outer board edge. Values above 1.0 are outside the board.")
@@ -767,9 +842,11 @@ def tab_positions(df):
         fig = go.Figure()
         fig.add_trace(make_transparent_heatmap(plot_df))
         add_board_traces(fig)
-        board_layout(fig)
+        board_layout(fig, title="Heatmap with board overlay")
         st.plotly_chart(fig, use_container_width=True, key="positions_heatmap")
-        st.caption("Zero-count bins are transparent so only areas with actual throws are coloured.")
+        st.caption("Zero-count bins are transparent so only areas with actual throws are coloured, with the board frame drawn over the heatmap so the segment boundaries remain visible.")
+
+    render_selected_segment_breakdown(plot_df, selected_seg, section_key="positions")
 
     miss_map = plot_df[(~plot_df["Hit"]) & plot_df["Board Segment Distance"].notna()].copy()
     if not miss_map.empty:
