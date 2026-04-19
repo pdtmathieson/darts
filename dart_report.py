@@ -44,6 +44,10 @@ COLORS = {
     "target_line": "rgba(255,255,255,0.35)",
     "board": "rgba(255,255,255,0.22)",
     "board_bold": "rgba(255,255,255,0.35)",
+    "adjacent": "#f39c12",
+    "neutral": "#95a5a6",
+    "left": "#3498db",
+    "right": "#9b59b6",
 }
 
 EXPECTED_COLUMNS = [
@@ -63,6 +67,8 @@ EXPECTED_COLUMNS = [
     "Name",
     "Mode",
     "Session",
+    "Points Target",
+    "Points Remaining",
 ]
 
 
@@ -117,6 +123,93 @@ def prepare_sheet_dataframe(values):
     return pd.DataFrame(rows, columns=headers)
 
 
+def _numeric_segment(value):
+    s = str(value).strip()
+    if s.isdigit():
+        return int(s)
+    return None
+
+
+def get_adjacent_segments(segment):
+    seg = _numeric_segment(segment)
+    if seg is None or seg not in DARTBOARD_ORDER:
+        return []
+    idx = DARTBOARD_ORDER.index(seg)
+    left_seg = DARTBOARD_ORDER[(idx - 1) % len(DARTBOARD_ORDER)]
+    right_seg = DARTBOARD_ORDER[(idx + 1) % len(DARTBOARD_ORDER)]
+    return [left_seg, right_seg]
+
+
+def get_nearby_segments(segment, distance=2):
+    seg = _numeric_segment(segment)
+    if seg is None or seg not in DARTBOARD_ORDER:
+        return []
+    idx = DARTBOARD_ORDER.index(seg)
+    nearby = []
+    for d in range(1, distance + 1):
+        nearby.append(DARTBOARD_ORDER[(idx - d) % len(DARTBOARD_ORDER)])
+        nearby.append(DARTBOARD_ORDER[(idx + d) % len(DARTBOARD_ORDER)])
+    seen = []
+    for n in nearby:
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def classify_adjacent_miss(target_segment, result_segment, result_modifier):
+    if str(result_modifier).strip() == "M":
+        return "Board Miss"
+    target_num = _numeric_segment(target_segment)
+    result_num = _numeric_segment(result_segment)
+    if target_num is None or result_num is None:
+        return "Non-numeric / bull"
+    if target_num == result_num:
+        return "Hit"
+
+    adjacent = get_adjacent_segments(target_num)
+    nearby = get_nearby_segments(target_num, distance=2)
+
+    if result_num in adjacent:
+        if adjacent[0] == result_num:
+            return "Adjacent Left"
+        if adjacent[1] == result_num:
+            return "Adjacent Right"
+        return "Adjacent"
+    if result_num in nearby:
+        return "Nearby (2 away)"
+    return "Other Number"
+
+
+def throw_position_in_visit(group):
+    size = len(group)
+    return pd.Series([(i % 3) + 1 for i in range(size)], index=group.index)
+
+
+def is_double_score(result_segment, result_modifier):
+    seg = str(result_segment).strip()
+    mod = str(result_modifier).strip()
+    return mod == "D" or seg == "+"
+
+
+def is_checkout_attempt(points_remaining):
+    try:
+        remaining = float(points_remaining)
+    except (TypeError, ValueError):
+        return False
+    return remaining <= 170 and remaining > 1
+
+
+def is_successful_checkout(points_remaining, result_segment, result_modifier):
+    try:
+        remaining = float(points_remaining)
+    except (TypeError, ValueError):
+        return False
+    score = score_throw(result_segment, result_modifier)
+    if remaining - score != 0:
+        return False
+    return is_double_score(result_segment, result_modifier)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_data_from_sheet():
     try:
@@ -166,6 +259,8 @@ def load_data_from_sheet():
         "Result Radius Pct",
         "Result Angle",
         "Session",
+        "Points Target",
+        "Points Remaining",
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -189,6 +284,38 @@ def load_data_from_sheet():
     df["Distance from Target mm"] = (
         np.sqrt((df["Result X mm"] - df["Target X mm"]) ** 2 + (df["Result Y mm"] - df["Target Y mm"]) ** 2)
     ).round(1)
+
+    df = df.reset_index().rename(columns={"index": "Row Order"})
+    sort_cols = ["Name", "Session", "Timestamp", "Row Order"]
+    df = df.sort_values(sort_cols, na_position="last").copy()
+
+    df["Throw In Visit"] = df.groupby(["Name", "Session"], dropna=False).apply(throw_position_in_visit).reset_index(level=[0, 1], drop=True)
+    df["Visit Number"] = (((df["Throw In Visit"] - 1).groupby([df["Name"], df["Session"]]).cumcount()) // 3) + 1
+
+    df["Adjacent Miss Type"] = df.apply(
+        lambda r: classify_adjacent_miss(r["Target Segment"], r["Result Segment"], r["Result Modifier"]),
+        axis=1,
+    )
+    df["Is Adjacent Miss"] = df["Adjacent Miss Type"].isin(["Adjacent Left", "Adjacent Right"])
+    df["Is Nearby Miss"] = df["Adjacent Miss Type"].isin(["Adjacent Left", "Adjacent Right", "Nearby (2 away)"])
+    df["Checkout Attempt"] = df["Points Remaining"].apply(is_checkout_attempt)
+    df["Checkout Success"] = df.apply(
+        lambda r: is_successful_checkout(r["Points Remaining"], r["Result Segment"], r["Result Modifier"]),
+        axis=1,
+    )
+    df["Competition Bust"] = (
+        df["Mode"].astype(str).str.strip().str.lower().eq("competition")
+        & df["Points Remaining"].notna()
+        & (
+            ((df["Points Remaining"] - df["Score"]) < 0)
+            | ((df["Points Remaining"] - df["Score"]) == 1)
+            | (
+                ((df["Points Remaining"] - df["Score"]) == 0)
+                & (~df.apply(lambda r: is_double_score(r["Result Segment"], r["Result Modifier"]), axis=1))
+            )
+        )
+    )
+    df["Reached Finish"] = df["Points Remaining"].apply(is_checkout_attempt)
 
     return df, []
 
@@ -263,8 +390,9 @@ def render_kpis(df):
     avg_sc = df["Score"].mean() if total > 0 else 0
     doubles = int((df["Result Modifier"] == "D").sum())
     avg_dist = df["Distance from Target mm"].dropna().mean() if total > 0 else np.nan
+    adjacent_rate = (df["Is Adjacent Miss"].mean() * 100) if total > 0 else 0
 
-    cols = st.columns(7)
+    cols = st.columns(8)
     for col, (label, value) in zip(
         cols,
         [
@@ -275,6 +403,7 @@ def render_kpis(df):
             ("⚡ Avg Score", f"{avg_sc:.2f}"),
             ("✌️ Doubles", f"{doubles:,}"),
             ("📏 Avg Error", f"{avg_dist:.1f} mm" if pd.notna(avg_dist) else "—"),
+            ("↔️ Adjacent Misses", f"{adjacent_rate:.1f}%"),
         ],
     ):
         col.metric(label, value)
@@ -302,6 +431,157 @@ def format_mode_scope_caption(df, scope_label):
     )
     mode_text = ", ".join([f"{mode} ({count:,})" for mode, count in mode_counts.items()])
     return f"Scope: {scope_label}. Modes included: {mode_text}."
+
+
+def build_adjacent_summary(df):
+    numeric_targets = df[df["Target Segment"].apply(lambda x: _numeric_segment(x) is not None)].copy()
+    if numeric_targets.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    rows = []
+    detail_rows = []
+
+    for seg in sorted({_numeric_segment(v) for v in numeric_targets["Target Segment"] if _numeric_segment(v) is not None}):
+        seg_df = numeric_targets[numeric_targets["Target Segment"].astype(str) == str(seg)].copy()
+        if seg_df.empty:
+            continue
+
+        adjacent = get_adjacent_segments(seg)
+        nearby = get_nearby_segments(seg, distance=2)
+        left_seg = adjacent[0] if len(adjacent) >= 1 else None
+        right_seg = adjacent[1] if len(adjacent) >= 2 else None
+
+        throws = len(seg_df)
+        exact_hits = int((seg_df["Result Segment"].astype(str) == str(seg)).sum())
+        left_hits = int((seg_df["Result Segment"].astype(str) == str(left_seg)).sum()) if left_seg is not None else 0
+        right_hits = int((seg_df["Result Segment"].astype(str) == str(right_seg)).sum()) if right_seg is not None else 0
+        nearby_hits = int(seg_df["Result Segment"].astype(str).isin([str(x) for x in nearby]).sum())
+        board_misses = int((seg_df["Result Modifier"] == "M").sum())
+
+        rows.append(
+            {
+                "Target Segment": seg,
+                "Throws": throws,
+                "Exact Hit %": round(exact_hits / throws * 100, 1) if throws else 0,
+                "Adjacent %": round((left_hits + right_hits) / throws * 100, 1) if throws else 0,
+                "Left Adjacent": left_seg,
+                "Left %": round(left_hits / throws * 100, 1) if throws else 0,
+                "Right Adjacent": right_seg,
+                "Right %": round(right_hits / throws * 100, 1) if throws else 0,
+                "Nearby (2 away) %": round(nearby_hits / throws * 100, 1) if throws else 0,
+                "Board Miss %": round(board_misses / throws * 100, 1) if throws else 0,
+            }
+        )
+
+        result_counts = (
+            seg_df["Result Segment"]
+            .astype(str)
+            .value_counts()
+            .reset_index()
+        )
+        result_counts.columns = ["Result Segment", "Count"]
+        result_counts["Target Segment"] = seg
+        result_counts["Rate %"] = (result_counts["Count"] / throws * 100).round(1)
+        result_counts["Bucket"] = result_counts["Result Segment"].apply(
+            lambda x: (
+                "Exact"
+                if str(x) == str(seg)
+                else "Adjacent"
+                if str(x) in [str(y) for y in adjacent]
+                else "Nearby (2 away)"
+                if str(x) in [str(y) for y in nearby]
+                else "Other"
+            )
+        )
+        detail_rows.append(result_counts)
+
+    summary = pd.DataFrame(rows)
+    detail = pd.concat(detail_rows, ignore_index=True) if detail_rows else pd.DataFrame()
+    return summary, detail
+
+
+def render_adjacent_section(df, heading="Adjacent Miss Analysis"):
+    st.subheader(heading)
+    summary, detail = build_adjacent_summary(df)
+
+    if summary.empty:
+        st.info("No numeric target-segment data is available for adjacent miss analysis.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Avg Adjacent Miss Rate", f"{summary['Adjacent %'].mean():.1f}%")
+    c2.metric("Best Controlled Number", str(summary.sort_values(["Adjacent %", "Throws"]).iloc[0]["Target Segment"]))
+    c3.metric("Worst Adjacent Leak", str(summary.sort_values(["Adjacent %", "Throws"], ascending=[False, False]).iloc[0]["Target Segment"]))
+    c4.metric("Avg Board Miss Rate", f"{summary['Board Miss %'].mean():.1f}%")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        plot_df = summary.sort_values("Target Segment")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=plot_df["Target Segment"].astype(str),
+            y=plot_df["Left %"],
+            name="Left adjacent",
+            marker_color=COLORS["left"],
+        ))
+        fig.add_trace(go.Bar(
+            x=plot_df["Target Segment"].astype(str),
+            y=plot_df["Right %"],
+            name="Right adjacent",
+            marker_color=COLORS["right"],
+        ))
+        fig.add_trace(go.Bar(
+            x=plot_df["Target Segment"].astype(str),
+            y=plot_df["Nearby (2 away) %"],
+            name="Nearby (2 away)",
+            marker_color=COLORS["adjacent"],
+        ))
+        fig.update_layout(
+            barmode="group",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(title="Rate %", gridcolor="rgba(255,255,255,0.05)"),
+            xaxis=dict(title="Target segment", type="category"),
+            height=380,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        top_leaks = detail[detail["Bucket"].isin(["Adjacent", "Nearby (2 away)"])].copy()
+        if top_leaks.empty:
+            st.info("No adjacent or nearby misses found.")
+        else:
+            top_leaks = top_leaks.sort_values(["Rate %", "Count"], ascending=[False, False]).head(15)
+            top_leaks["Label"] = top_leaks["Target Segment"].astype(str) + " → " + top_leaks["Result Segment"].astype(str)
+            fig2 = px.bar(
+                top_leaks.sort_values("Rate %"),
+                x="Rate %",
+                y="Label",
+                orientation="h",
+                color="Bucket",
+                color_discrete_map={
+                    "Adjacent": COLORS["adjacent"],
+                    "Nearby (2 away)": COLORS["neutral"],
+                },
+                text="Rate %",
+            )
+            fig2.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+            fig2.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                height=380,
+                margin=dict(t=10),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+    st.dataframe(
+        summary.sort_values("Target Segment"),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def tab_overview(df):
@@ -385,6 +665,8 @@ def tab_overview(df):
                 bargap=0.1,
             )
             st.plotly_chart(fig3, use_container_width=True)
+
+    render_adjacent_section(df, "Adjacent Miss Analysis")
 
 
 def tab_accuracy(df):
@@ -513,6 +795,7 @@ def build_points_segment_stats(points_df):
             Misses=("Result Modifier", lambda x: (x == "M").sum()),
             Doubles=("Result Modifier", lambda x: (x == "D").sum()),
             Triples=("Result Modifier", lambda x: (x == "T").sum()),
+            Adjacent_Misses=("Is Adjacent Miss", "sum"),
             Avg_Error_mm=("Distance from Target mm", "mean"),
             Std_Error_mm=("Distance from Target mm", "std"),
             Unique_Sessions=("Session", "nunique"),
@@ -527,6 +810,7 @@ def build_points_segment_stats(points_df):
     stats["Miss %"] = (stats["Misses"] / stats["Throws"] * 100).round(1)
     stats["Double %"] = (stats["Doubles"] / stats["Throws"] * 100).round(1)
     stats["Triple %"] = (stats["Triples"] / stats["Throws"] * 100).round(1)
+    stats["Adjacent Miss %"] = (stats["Adjacent_Misses"] / stats["Throws"] * 100).round(1)
     stats["Avg Points"] = stats["Avg_Points"].round(2)
     stats["Avg Error (mm)"] = stats["Avg_Error_mm"].round(1)
     stats["Error SD (mm)"] = stats["Std_Error_mm"].round(1)
@@ -604,7 +888,7 @@ def tab_points(df):
             x="Accuracy %",
             y="Avg_Points",
             size="Throws",
-            color="Miss %",
+            color="Adjacent Miss %",
             text="Target Segment",
             color_continuous_scale="RdYlGn_r",
             hover_data={
@@ -613,6 +897,7 @@ def tab_points(df):
                 "Triple %": ":.1f",
                 "Avg Error (mm)": ":.1f",
                 "Miss %": ":.1f",
+                "Adjacent Miss %": ":.1f",
             },
             labels={"Avg_Points": "Avg points per throw", "Accuracy %": "Accuracy %"},
         )
@@ -640,6 +925,7 @@ def tab_points(df):
                 "Double %",
                 "Triple %",
                 "Miss %",
+                "Adjacent Miss %",
                 "Points per Hit",
                 "Avg Error (mm)",
                 "Error SD (mm)",
@@ -651,7 +937,7 @@ def tab_points(df):
     )
 
     st.subheader("Outcome Mix by Target Segment")
-    outcome = stats[["Target Segment", "Double %", "Triple %", "Miss %"]].copy()
+    outcome = stats[["Target Segment", "Double %", "Triple %", "Miss %", "Adjacent Miss %"]].copy()
     outcome = outcome.sort_values("Target Segment", key=lambda s: s.map(segment_sort_key))
     melted = outcome.melt(id_vars="Target Segment", var_name="Outcome", value_name="Rate")
     fig3 = px.bar(
@@ -664,6 +950,7 @@ def tab_points(df):
             "Double %": "#3498db",
             "Triple %": "#9b59b6",
             "Miss %": COLORS["miss"],
+            "Adjacent Miss %": COLORS["adjacent"],
         },
         labels={"Rate": "Rate %", "Target Segment": "Target segment"},
     )
@@ -926,6 +1213,7 @@ def tab_positions(df):
                             subset["Target Segment"].astype(str),
                             subset["Result Segment"].astype(str),
                             subset["Result Modifier"].astype(str),
+                            subset["Adjacent Miss Type"].astype(str),
                             subset["Result Radius Pct"].round(3),
                             subset["Result Angle"].round(1),
                             subset["Score"],
@@ -937,10 +1225,11 @@ def tab_positions(df):
                         "%{customdata[0]}<br>"
                         "Target: %{customdata[1]}<br>"
                         "Result: %{customdata[2]} (%{customdata[3]})<br>"
-                        "Radius: %{customdata[4]}<br>"
-                        "Angle: %{customdata[5]}°<br>"
-                        "Score: %{customdata[6]}<br>"
-                        "Session: %{customdata[7]}<extra></extra>"
+                        "Miss class: %{customdata[4]}<br>"
+                        "Radius: %{customdata[5]}<br>"
+                        "Angle: %{customdata[6]}°<br>"
+                        "Score: %{customdata[7]}<br>"
+                        "Session: %{customdata[8]}<extra></extra>"
                     ),
                 )
             )
@@ -1049,16 +1338,18 @@ def tab_rtw(df):
     miss_rate = (rtw_df["Result Modifier"] == "M").mean() * 100 if total_throws else 0
     avg_score = rtw_df["Score"].mean() if total_throws else 0
     avg_dist = rtw_df["Distance from Target mm"].dropna().mean() if total_throws else np.nan
+    adj_rate = rtw_df["Is Adjacent Miss"].mean() * 100 if total_throws else 0
 
     streak_summary, streak_detail = build_consecutive_hit_streaks(rtw_df)
     longest_streak = int(streak_detail["Streak Length"].max()) if not streak_detail.empty else 0
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Accuracy", f"{hit_rate:.1f}%")
     col2.metric("Total Throws", f"{total_throws:,}")
     col3.metric("Avg Score", f"{avg_score:.2f}")
     col4.metric("Miss Rate", f"{miss_rate:.1f}%")
-    col5.metric("Longest Hit Streak", f"{longest_streak}x" if longest_streak else "—")
+    col5.metric("Adjacent Miss Rate", f"{adj_rate:.1f}%")
+    col6.metric("Longest Hit Streak", f"{longest_streak}x" if longest_streak else "—")
 
     st.caption(f"Average distance from target centre: **{avg_dist:.1f} mm**" if pd.notna(avg_dist) else "Average distance from target centre: —")
 
@@ -1197,6 +1488,333 @@ def tab_rtw(df):
         )
         st.plotly_chart(fig4, use_container_width=True)
 
+    render_adjacent_section(rtw_df, "RTW Adjacent Miss Analysis")
+
+
+def build_competition_match_summary(comp_df):
+    if comp_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    comp_df = comp_df.copy().sort_values(["Session", "Timestamp", "Row Order"], na_position="last")
+
+    match_cols = ["Session"]
+    if "Date" in comp_df.columns:
+        match_cols.append("Date")
+
+    player_match = (
+        comp_df.groupby(match_cols + ["Name"])
+        .agg(
+            Throws=("Score", "count"),
+            Total_Scored=("Score", "sum"),
+            Avg_Points_Throw=("Score", "mean"),
+            Checkout_Attempts=("Checkout Attempt", "sum"),
+            Checkout_Successes=("Checkout Success", "sum"),
+            Busts=("Competition Bust", "sum"),
+            Avg_Remaining=("Points Remaining", "mean"),
+            Start_Target=("Points Target", "max"),
+        )
+        .reset_index()
+    )
+
+    if player_match.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    visit_df = (
+        comp_df.groupby(["Session", "Name", "Visit Number"])
+        .agg(Visit_Points=("Score", "sum"))
+        .reset_index()
+    )
+    visit_summary = (
+        visit_df.groupby(["Session", "Name"])
+        .agg(
+            Visits=("Visit_Points", "count"),
+            Avg_Points_Visit=("Visit_Points", "mean"),
+            Best_Visit=("Visit_Points", "max"),
+        )
+        .reset_index()
+    )
+
+    player_match = player_match.merge(visit_summary, on=["Session", "Name"], how="left")
+    player_match["Checkout %"] = (
+        player_match["Checkout_Successes"] / player_match["Checkout_Attempts"].replace(0, np.nan) * 100
+    ).round(1)
+    player_match["Avg_Points_Throw"] = player_match["Avg_Points_Throw"].round(2)
+    player_match["Avg_Points_Visit"] = player_match["Avg_Points_Visit"].round(2)
+    player_match["Best_Visit"] = player_match["Best_Visit"].fillna(0).astype(float).round(0)
+
+    winners = (
+        player_match.sort_values(
+            ["Session", "Checkout_Successes", "Total_Scored", "Avg_Points_Throw"],
+            ascending=[True, False, False, False],
+        )
+        .groupby("Session")
+        .head(1)[["Session", "Name"]]
+        .rename(columns={"Name": "Winner"})
+    )
+
+    session_summary = (
+        comp_df.groupby(["Session"])
+        .agg(
+            Date=("Date", "max"),
+            Players=("Name", lambda x: ", ".join(sorted(pd.Series(x).dropna().astype(str).unique()))),
+            Total_Throws=("Score", "count"),
+            Total_Points=("Score", "sum"),
+            Checkout_Attempts=("Checkout Attempt", "sum"),
+            Checkout_Successes=("Checkout Success", "sum"),
+            Busts=("Competition Bust", "sum"),
+        )
+        .reset_index()
+        .merge(winners, on="Session", how="left")
+        .sort_values("Session", ascending=False)
+    )
+    session_summary["Checkout %"] = (
+        session_summary["Checkout_Successes"] / session_summary["Checkout_Attempts"].replace(0, np.nan) * 100
+    ).round(1)
+
+    throw_split = (
+        comp_df.groupby(["Name", "Throw In Visit"])
+        .agg(
+            Throws=("Score", "count"),
+            Avg_Points=("Score", "mean"),
+            Total_Points=("Score", "sum"),
+            Checkout_Attempts=("Checkout Attempt", "sum"),
+            Checkout_Successes=("Checkout Success", "sum"),
+        )
+        .reset_index()
+    )
+    throw_split["Checkout %"] = (
+        throw_split["Checkout_Successes"] / throw_split["Checkout_Attempts"].replace(0, np.nan) * 100
+    ).round(1)
+    throw_split["Avg_Points"] = throw_split["Avg_Points"].round(2)
+
+    return player_match, session_summary, throw_split
+
+
+def tab_competition(df):
+    st.subheader("Competition Report — 501 Match Analysis")
+    include_all_modes = st.toggle(
+        "Include all modes in this report",
+        value=False,
+        key="competition_include_all_modes",
+        help="Off = Competition only. On = use all currently filtered data.",
+    )
+
+    comp_df, scope_label = get_mode_scoped_df(df, "Competition", include_all_modes)
+    if comp_df.empty:
+        st.info("No data found for this Competition report with the current filters.")
+        return
+
+    st.caption(format_mode_scope_caption(comp_df, scope_label))
+    player_match, session_summary, throw_split = build_competition_match_summary(comp_df)
+
+    if player_match.empty:
+        st.info("Not enough Competition data to build the report.")
+        return
+
+    overall_checkout_attempts = int(comp_df["Checkout Attempt"].sum())
+    overall_checkout_successes = int(comp_df["Checkout Success"].sum())
+    overall_checkout_pct = (overall_checkout_successes / overall_checkout_attempts * 100) if overall_checkout_attempts else 0
+    overall_avg_throw = comp_df["Score"].mean() if len(comp_df) else 0
+    visit_points = comp_df.groupby(["Session", "Name", "Visit Number"]).agg(Visit_Points=("Score", "sum")).reset_index()
+    overall_avg_visit = visit_points["Visit_Points"].mean() if not visit_points.empty else 0
+    bust_rate = comp_df["Competition Bust"].mean() * 100 if len(comp_df) else 0
+    winning_sessions = session_summary["Winner"].nunique()
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Matches", f"{session_summary['Session'].nunique():,}")
+    c2.metric("Avg Points / Throw", f"{overall_avg_throw:.2f}")
+    c3.metric("Avg Points / Visit", f"{overall_avg_visit:.2f}")
+    c4.metric("Checkout %", f"{overall_checkout_pct:.1f}%")
+    c5.metric("Checkout Successes", f"{overall_checkout_successes:,}")
+    c6.metric("Bust Rate", f"{bust_rate:.1f}%")
+
+    st.subheader("Match Winners")
+    st.dataframe(
+        session_summary[
+            [
+                "Session",
+                "Date",
+                "Players",
+                "Winner",
+                "Total_Throws",
+                "Total_Points",
+                "Checkout_Attempts",
+                "Checkout_Successes",
+                "Checkout %",
+                "Busts",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Player Match Summary")
+        display_df = player_match.copy().sort_values(["Session", "Avg_Points_Throw"], ascending=[False, False])
+        st.dataframe(
+            display_df[
+                [
+                    "Session",
+                    "Name",
+                    "Throws",
+                    "Total_Scored",
+                    "Avg_Points_Throw",
+                    "Avg_Points_Visit",
+                    "Best_Visit",
+                    "Checkout_Attempts",
+                    "Checkout_Successes",
+                    "Checkout %",
+                    "Busts",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with col2:
+        st.subheader("Average Scoring by Match")
+        fig = px.bar(
+            player_match.sort_values(["Session", "Name"]),
+            x="Session",
+            y="Avg_Points_Throw",
+            color="Name",
+            barmode="group",
+            text="Avg_Points_Throw",
+            labels={"Avg_Points_Throw": "Avg points / throw"},
+        )
+        fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=420,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    col3, col4 = st.columns(2)
+
+    with col3:
+        st.subheader("Average Points per Visit")
+        fig2 = px.bar(
+            player_match.sort_values("Avg_Points_Visit", ascending=False),
+            x="Name",
+            y="Avg_Points_Visit",
+            color="Name",
+            text="Avg_Points_Visit",
+            labels={"Avg_Points_Visit": "Avg points / visit of 3"},
+        )
+        fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig2.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=360,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with col4:
+        st.subheader("Checkout and Bust Profile")
+        profile = (
+            player_match.groupby("Name")
+            .agg(
+                Checkout_Attempts=("Checkout_Attempts", "sum"),
+                Checkout_Successes=("Checkout_Successes", "sum"),
+                Busts=("Busts", "sum"),
+                Throws=("Throws", "sum"),
+            )
+            .reset_index()
+        )
+        profile["Checkout %"] = (profile["Checkout_Successes"] / profile["Checkout_Attempts"].replace(0, np.nan) * 100).round(1)
+        profile["Bust %"] = (profile["Busts"] / profile["Throws"].replace(0, np.nan) * 100).round(1)
+
+        melted = profile.melt(id_vars="Name", value_vars=["Checkout %", "Bust %"], var_name="Metric", value_name="Rate")
+        fig3 = px.bar(
+            melted,
+            x="Name",
+            y="Rate",
+            color="Metric",
+            barmode="group",
+            text="Rate",
+            color_discrete_map={"Checkout %": COLORS["hit"], "Bust %": COLORS["miss"]},
+        )
+        fig3.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig3.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=360,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+    st.subheader("First, Second, Third Dart Breakdown")
+    if throw_split.empty:
+        st.info("No throw-order data available.")
+    else:
+        throw_labels = {1: "1st dart", 2: "2nd dart", 3: "3rd dart"}
+        throw_split["Throw Label"] = throw_split["Throw In Visit"].map(throw_labels).fillna(throw_split["Throw In Visit"].astype(str))
+
+        fig4 = px.bar(
+            throw_split,
+            x="Throw Label",
+            y="Avg_Points",
+            color="Name",
+            barmode="group",
+            text="Avg_Points",
+            labels={"Avg_Points": "Avg points"},
+        )
+        fig4.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig4.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=360,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+
+        st.dataframe(
+            throw_split[["Name", "Throw Label", "Throws", "Avg_Points", "Total_Points", "Checkout_Attempts", "Checkout_Successes", "Checkout %"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Scoring Bands")
+    scoring = comp_df.copy()
+    scoring["Scoring Band"] = pd.cut(
+        scoring["Score"],
+        bins=[-1, 0, 20, 40, 60, 100, 180],
+        labels=["0", "1-20", "21-40", "41-60", "61-100", "101-180"],
+    )
+    bands = (
+        scoring.groupby(["Name", "Scoring Band"])
+        .size()
+        .reset_index(name="Count")
+    )
+    if not bands.empty:
+        fig5 = px.bar(
+            bands,
+            x="Scoring Band",
+            y="Count",
+            color="Name",
+            barmode="group",
+        )
+        fig5.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            height=340,
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig5, use_container_width=True)
+
+    render_adjacent_section(comp_df, "Competition Adjacent Miss Analysis")
+
 
 def tab_players(df):
     st.subheader("Player Comparison")
@@ -1210,6 +1828,7 @@ def tab_players(df):
             Avg_Error_mm=("Distance from Target mm", "mean"),
             Doubles=("Result Modifier", lambda x: (x == "D").sum()),
             Triples=("Result Modifier", lambda x: (x == "T").sum()),
+            Adjacent_Misses=("Is Adjacent Miss", "sum"),
             Sessions=("Session", "nunique"),
         )
         .reset_index()
@@ -1222,6 +1841,7 @@ def tab_players(df):
     player_stats["Accuracy (%)"] = (player_stats["Hits"] / player_stats["Throws"] * 100).round(1)
     player_stats["Avg Score"] = player_stats["Avg_Score"].round(2)
     player_stats["Avg Error (mm)"] = player_stats["Avg_Error_mm"].round(1)
+    player_stats["Adjacent Miss %"] = (player_stats["Adjacent_Misses"] / player_stats["Throws"] * 100).round(1)
 
     st.dataframe(
         player_stats[
@@ -1233,6 +1853,7 @@ def tab_players(df):
                 "Accuracy (%)",
                 "Avg Score",
                 "Avg Error (mm)",
+                "Adjacent Miss %",
                 "Doubles",
                 "Triples",
                 "Sessions",
@@ -1276,6 +1897,7 @@ def tab_sessions(df):
             Misses=("Result Modifier", lambda x: (x == "M").sum()),
             Avg_Score=("Score", "mean"),
             Avg_Error_mm=("Distance from Target mm", "mean"),
+            Adjacent_Misses=("Is Adjacent Miss", "sum"),
             Modes=("Mode", lambda x: ", ".join(sorted(pd.Series(x).dropna().astype(str).unique()))),
         )
         .reset_index()
@@ -1288,6 +1910,7 @@ def tab_sessions(df):
     sess_stats["Accuracy (%)"] = (sess_stats["Hits"] / sess_stats["Throws"] * 100).round(1)
     sess_stats["Avg Score"] = sess_stats["Avg_Score"].round(2)
     sess_stats["Avg Error (mm)"] = sess_stats["Avg_Error_mm"].round(1)
+    sess_stats["Adjacent Miss %"] = (sess_stats["Adjacent_Misses"] / sess_stats["Throws"] * 100).round(1)
     sess_stats = sess_stats.sort_values("Session", ascending=False)
 
     st.dataframe(
@@ -1303,6 +1926,7 @@ def tab_sessions(df):
                 "Accuracy (%)",
                 "Avg Score",
                 "Avg Error (mm)",
+                "Adjacent Miss %",
             ]
         ],
         use_container_width=True,
@@ -1428,6 +2052,7 @@ def main():
             "📊 Overview",
             "🎯 Accuracy",
             "💯 Points",
+            "🏆 Competition",
             "📍 Positions",
             "🔄 RTW",
             "👥 Players",
@@ -1443,14 +2068,16 @@ def main():
     with tabs[2]:
         tab_points(filtered)
     with tabs[3]:
-        tab_positions(filtered)
+        tab_competition(filtered)
     with tabs[4]:
-        tab_rtw(filtered)
+        tab_positions(filtered)
     with tabs[5]:
-        tab_players(filtered)
+        tab_rtw(filtered)
     with tabs[6]:
-        tab_sessions(filtered)
+        tab_players(filtered)
     with tabs[7]:
+        tab_sessions(filtered)
+    with tabs[8]:
         tab_raw(filtered)
 
 
